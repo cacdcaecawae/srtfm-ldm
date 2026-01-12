@@ -1,6 +1,7 @@
 import argparse
 import csv
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -53,6 +54,11 @@ def resolve_device(preferred: Optional[str]) -> torch.device:
     return device
 
 
+def env_flag(name: str) -> bool:
+    value = os.getenv(name, "")
+    return value.strip().lower() in ("1", "true", "yes", "y", "on")
+
+
 def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
@@ -98,7 +104,8 @@ def select_state_dict(checkpoint: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def build_models(cfg: Dict[str, Any],
-                 device: torch.device) -> Tuple[torch.nn.Module, torch.nn.Module]:
+                 device: torch.device,
+                 two_stage: bool = True) -> Tuple[Optional[torch.nn.Module], torch.nn.Module]:
     """Build the frozen UNet and the I2SB diffusion model."""
     model_cfg = cfg["model"]
     data_cfg = cfg["data"]
@@ -107,10 +114,6 @@ def build_models(cfg: Dict[str, Any],
                                       model_cfg.get("backbone", "unet_res_diffusion"))
     if i2sb_backbone_key not in MODEL_CONFIGS:
         raise KeyError(f"Unknown I2SB backbone '{i2sb_backbone_key}'. "
-                       f"Available: {', '.join(MODEL_CONFIGS)}")
-    unet_backbone_key = model_cfg.get("unet_backbone", "unet_res")
-    if unet_backbone_key not in MODEL_CONFIGS:
-        raise KeyError(f"Unknown UNet backbone '{unet_backbone_key}'. "
                        f"Available: {', '.join(MODEL_CONFIGS)}")
 
     n_steps = model_cfg["diffusion_steps"]
@@ -122,7 +125,8 @@ def build_models(cfg: Dict[str, Any],
     image_size = data_cfg["image_size"]
 
     lr_channels = 3 if data_cfg.get("use_tfm_channels", False) else in_channels
-    i2sb_lr_channels = in_channels + lr_channels
+    i2sb_lr_channels = in_channels + lr_channels if two_stage else lr_channels
+    unet = None
 
     i2sb_cfg = MODEL_CONFIGS[i2sb_backbone_key].copy()
     i2sb_net = build_network(i2sb_cfg,
@@ -141,20 +145,25 @@ def build_models(cfg: Dict[str, Any],
     i2sb_net.eval()
     print(f"Loaded I2SB model from {i2sb_ckpt_path}")
 
-    unet_ckpt_path = model_cfg.get("unet_checkpoint")
-    if not unet_ckpt_path:
-        raise ValueError("unet_checkpoint is required for two-stage I2SB evaluation.")
-    unet_cfg = MODEL_CONFIGS[unet_backbone_key].copy()
-    unet = build_network(unet_cfg,
-                         in_channels=in_channels,
-                         image_size=image_size,
-                         lr_channels=lr_channels,
-                         n_steps=None).to(device)
-    unet_checkpoint = torch.load(unet_ckpt_path, map_location=device)
-    unet_state_dict = select_state_dict(unet_checkpoint)
-    unet.load_state_dict(unet_state_dict)
-    unet.eval()
-    print(f"Loaded UNet model from {unet_ckpt_path}")
+    if two_stage:
+        unet_backbone_key = model_cfg.get("unet_backbone", "unet_res")
+        if unet_backbone_key not in MODEL_CONFIGS:
+            raise KeyError(f"Unknown UNet backbone '{unet_backbone_key}'. "
+                           f"Available: {', '.join(MODEL_CONFIGS)}")
+        unet_ckpt_path = model_cfg.get("unet_checkpoint")
+        if not unet_ckpt_path:
+            raise ValueError("unet_checkpoint is required for two-stage I2SB evaluation.")
+        unet_cfg = MODEL_CONFIGS[unet_backbone_key].copy()
+        unet = build_network(unet_cfg,
+                             in_channels=in_channels,
+                             image_size=image_size,
+                             lr_channels=lr_channels,
+                             n_steps=None).to(device)
+        unet_checkpoint = torch.load(unet_ckpt_path, map_location=device)
+        unet_state_dict = select_state_dict(unet_checkpoint)
+        unet.load_state_dict(unet_state_dict)
+        unet.eval()
+        print(f"Loaded UNet model from {unet_ckpt_path}")
 
     return unet, i2sb_net
 
@@ -243,13 +252,13 @@ def tensor_to_image(tensor: torch.Tensor,
     return Image.fromarray(array)
 
 
-def evaluate(cfg: Dict[str, Any], device: torch.device) -> None:
+def evaluate(cfg: Dict[str, Any], device: torch.device, two_stage: bool = True) -> None:
     """执行 I2SB 评估"""
     data_cfg = cfg["data"]
     sampler_cfg = cfg.get("sampler", {})
     
     dataloader = create_dataloader(data_cfg)
-    unet, net = build_models(cfg, device)
+    unet, net = build_models(cfg, device, two_stage=two_stage)
     diffusion = create_diffusion(cfg, device)
     
     use_jet = data_cfg.get("channels", 1) == 1
@@ -289,8 +298,11 @@ def evaluate(cfg: Dict[str, Any], device: torch.device) -> None:
             lr_images = lr_images.to(device)
             hr_images = hr_images.to(device)
             
-            coarse_hr = unet(lr_images)
-            condition = torch.cat([coarse_hr, lr_images], dim=1)
+            if two_stage:
+                coarse_hr = unet(lr_images)
+                condition = torch.cat([coarse_hr, lr_images], dim=1)
+            else:
+                condition = lr_images
 
             # I2SB 采样：使用 ddpm_sampling 方法
             sr_images = diffusion.ddpm_sampling(
@@ -400,7 +412,10 @@ def main() -> None:
     cfg = load_config(args.config)
     device = resolve_device(cfg.get("device"))
     print(f"Using device: {device}")
-    evaluate(cfg, device)
+    single_stage = env_flag("SR_SINGLE_STAGE")
+    if single_stage:
+        print("Single-stage mode: I2SB conditioned on LR only.")
+    evaluate(cfg, device, two_stage=not single_stage)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 import argparse
 import csv
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -50,6 +51,11 @@ def resolve_device(preferred: Optional[str]) -> torch.device:
     if device.type == "cuda" and not torch.cuda.is_available():
         device = torch.device("cpu")
     return device
+
+
+def env_flag(name: str) -> bool:
+    value = os.getenv(name, "")
+    return value.strip().lower() in ("1", "true", "yes", "y", "on")
 
 
 def ensure_dir(path: Path) -> None:
@@ -104,33 +110,34 @@ def normalize_sampler_type(sampler_type: Optional[str]) -> str:
 
 def build_models(cfg: Dict[str, Any],
                  device: torch.device,
-                 sampler_type: str) -> Tuple[torch.nn.Module, torch.nn.Module, Any]:
+                 sampler_type: str,
+                 two_stage: bool = True) -> Tuple[Optional[torch.nn.Module], torch.nn.Module, Any]:
     model_cfg = cfg["model"]
     data_cfg = cfg["data"]
     sampler_type = normalize_sampler_type(sampler_type)
 
-    unet_backbone_key = model_cfg.get("unet_backbone", "unet_res")
-    if unet_backbone_key not in MODEL_CONFIGS:
-        raise KeyError(f"Unknown UNet backbone '{unet_backbone_key}'. "
-                       f"Available: {', '.join(MODEL_CONFIGS)}")
+    in_channels = data_cfg["channels"]
+    image_size = data_cfg["image_size"]
+    lr_channels = 3 if data_cfg.get("use_tfm_channels", False) else in_channels
+    ddpm_lr_channels = in_channels + lr_channels if two_stage else lr_channels
+    unet = None
+    if two_stage:
+        unet_backbone_key = model_cfg.get("unet_backbone", "unet_res")
+        if unet_backbone_key not in MODEL_CONFIGS:
+            raise KeyError(f"Unknown UNet backbone '{unet_backbone_key}'. "
+                           f"Available: {', '.join(MODEL_CONFIGS)}")
+        unet_cfg = MODEL_CONFIGS[unet_backbone_key].copy()
+        unet = build_network(unet_cfg,
+                             in_channels=in_channels,
+                             image_size=image_size,
+                             lr_channels=lr_channels,
+                             n_steps=None).to(device)
+
     ddpm_backbone_key = model_cfg.get("ddpm_backbone", "unet_res_diffusion")
     if ddpm_backbone_key not in MODEL_CONFIGS:
         raise KeyError(f"Unknown DDPM backbone '{ddpm_backbone_key}'. "
                        f"Available: {', '.join(MODEL_CONFIGS)}")
-
-    in_channels = data_cfg["channels"]
-    image_size = data_cfg["image_size"]
-    lr_channels = 3 if data_cfg.get("use_tfm_channels", False) else in_channels
-    ddpm_lr_channels = in_channels + lr_channels
-
-    unet_cfg = MODEL_CONFIGS[unet_backbone_key].copy()
     ddpm_cfg = MODEL_CONFIGS[ddpm_backbone_key].copy()
-
-    unet = build_network(unet_cfg,
-                         in_channels=in_channels,
-                         image_size=image_size,
-                         lr_channels=lr_channels,
-                         n_steps=None).to(device)
 
     n_steps = model_cfg["diffusion_steps"]
     ddpm_net = build_network(ddpm_cfg,
@@ -139,13 +146,16 @@ def build_models(cfg: Dict[str, Any],
                              lr_channels=ddpm_lr_channels,
                              n_steps=n_steps).to(device)
 
-    unet_ckpt_path = model_cfg.get("unet_checkpoint")
-    if not unet_ckpt_path:
-        raise ValueError("unet_checkpoint is required for DDPM evaluation.")
-    unet_checkpoint = torch.load(unet_ckpt_path, map_location=device)
-    unet_state_dict = select_state_dict(unet_checkpoint)
-    unet.load_state_dict(unet_state_dict)
-    unet.eval()
+    if two_stage:
+        unet_ckpt_path = model_cfg.get("unet_checkpoint")
+        if not unet_ckpt_path:
+            raise ValueError("unet_checkpoint is required for DDPM evaluation.")
+        unet_checkpoint = torch.load(unet_ckpt_path, map_location=device)
+        unet_state_dict = select_state_dict(unet_checkpoint)
+        if unet is None:
+            raise ValueError("UNet model is not initialized.")
+        unet.load_state_dict(unet_state_dict)
+        unet.eval()
 
     ddpm_ckpt_path = model_cfg.get("ddpm_checkpoint")
     if not ddpm_ckpt_path:
@@ -197,13 +207,13 @@ def tensor_to_image(tensor: torch.Tensor, apply_jet: bool = False) -> Image.Imag
     return Image.fromarray(array)
 
 
-def evaluate(cfg: Dict[str, Any], device: torch.device) -> None:
+def evaluate(cfg: Dict[str, Any], device: torch.device, two_stage: bool = True) -> None:
     data_cfg = cfg["data"]
     sampler_cfg = cfg.get("sampler", {})
     sampler_type = normalize_sampler_type(sampler_cfg.get("type"))
 
     dataloader = create_dataloader(cfg)
-    unet, ddpm_net, ddpm = build_models(cfg, device, sampler_type)
+    unet, ddpm_net, ddpm = build_models(cfg, device, sampler_type, two_stage=two_stage)
 
     use_jet = data_cfg.get("channels", 1) == 1
     output_root = Path(cfg["output"]["root"])
@@ -233,8 +243,11 @@ def evaluate(cfg: Dict[str, Any], device: torch.device) -> None:
             lr_images = lr_images.to(device)
             hr_images = hr_images.to(device)
 
-            coarse_hr = unet(lr_images)
-            condition = torch.cat([coarse_hr, lr_images], dim=1)
+            if two_stage:
+                coarse_hr = unet(lr_images)
+                condition = torch.cat([coarse_hr, lr_images], dim=1)
+            else:
+                condition = lr_images
 
             img_shape = tuple(hr_images.shape)
             if sampler_type == "ddim":
@@ -308,7 +321,10 @@ def evaluate(cfg: Dict[str, Any], device: torch.device) -> None:
     with results_txt.open("w", encoding="utf-8") as handle:
         handle.write("DDPM Evaluation Summary\n")
         handle.write("======================\n")
-        handle.write(f"UNet: {cfg['model']['unet_checkpoint']}\n")
+        if two_stage:
+            handle.write(f"UNet: {cfg['model']['unet_checkpoint']}\n")
+        else:
+            handle.write("UNet: disabled\n")
         handle.write(f"DDPM: {cfg['model']['ddpm_checkpoint']}\n")
         handle.write(f"Dataset: {data_source}\n")
         handle.write(f"Sampler: {sampler_type}\n")
@@ -332,7 +348,7 @@ def evaluate(cfg: Dict[str, Any], device: torch.device) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Evaluate two-stage DDPM SR model.")
+    parser = argparse.ArgumentParser(description="Evaluate DDPM SR model.")
     parser.add_argument("--config",
                         type=Path,
                         default=DEFAULT_CONFIG_PATH,
@@ -345,7 +361,10 @@ def main() -> None:
     cfg = load_config(args.config)
     device = resolve_device(cfg.get("device"))
     print(f"Using device: {device}")
-    evaluate(cfg, device)
+    single_stage = env_flag("SR_SINGLE_STAGE")
+    if single_stage:
+        print("Single-stage mode: DDPM conditioned on LR only.")
+    evaluate(cfg, device, two_stage=not single_stage)
 
 
 if __name__ == "__main__":

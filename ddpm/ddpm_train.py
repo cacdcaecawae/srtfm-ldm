@@ -82,6 +82,11 @@ def resolve_device(preferred: Optional[str]) -> torch.device:
     return device
 
 
+def env_flag(name: str) -> bool:
+    value = os.getenv(name, "")
+    return value.strip().lower() in ("1", "true", "yes", "y", "on")
+
+
 @torch.no_grad()
 def ema_update(ema_model: nn.Module, model: nn.Module, decay: float) -> None:
     ema_sd = ema_model.state_dict()
@@ -178,7 +183,9 @@ def save_grid_image(tensor: torch.Tensor, output_path: Path) -> None:
     image.save(output_path)
 
 
-def build_models(cfg: Dict[str, Any], device: torch.device) -> Tuple[nn.Module, nn.Module]:
+def build_models(cfg: Dict[str, Any],
+                 device: torch.device,
+                 two_stage: bool = True) -> Tuple[Optional[nn.Module], nn.Module]:
     """构建 UNet 和 DDPM 模型。
     
     Returns:
@@ -189,15 +196,16 @@ def build_models(cfg: Dict[str, Any], device: torch.device) -> Tuple[nn.Module, 
     image_size = data_cfg["image_size"]
     in_channels = data_cfg["channels"]  # HR 的通道数 (1)
     
-    # 1. 构建 UNet（用于生成粗糙 HR）
-    unet_backbone_key = model_cfg.get("unet_backbone", "unet_res")
-    if unet_backbone_key not in MODEL_CONFIGS:
-        raise KeyError(f"Unknown UNet backbone '{unet_backbone_key}'")
-    unet_cfg = MODEL_CONFIGS[unet_backbone_key].copy()
-    
     # UNet 输入是 TFM 3通道，输出是 HR 1通道
     lr_channels = 3 if data_cfg.get("use_tfm_channels", False) else in_channels
-    unet = build_network(unet_cfg, in_channels, image_size, lr_channels, n_steps=None).to(device)
+    unet = None
+    if two_stage:
+        # 1. 构建 UNet（用于生成粗糙 HR）
+        unet_backbone_key = model_cfg.get("unet_backbone", "unet_res")
+        if unet_backbone_key not in MODEL_CONFIGS:
+            raise KeyError(f"Unknown UNet backbone '{unet_backbone_key}'")
+        unet_cfg = MODEL_CONFIGS[unet_backbone_key].copy()
+        unet = build_network(unet_cfg, in_channels, image_size, lr_channels, n_steps=None).to(device)
     
     # 2. 构建 DDPM（用于细化）
     ddpm_backbone_key = model_cfg.get("ddpm_backbone", "unet_res_diffusion")
@@ -207,7 +215,7 @@ def build_models(cfg: Dict[str, Any], device: torch.device) -> Tuple[nn.Module, 
     n_steps = model_cfg["diffusion_steps"]
     
     # DDPM 输入是：粗糙HR(1) + TFM(3) = 4通道条件，输出是噪声预测(1)
-    ddpm_lr_channels = in_channels + lr_channels  # 1 + 3 = 4
+    ddpm_lr_channels = in_channels + lr_channels if two_stage else lr_channels
     ddpm_net = build_network(ddpm_cfg, in_channels, image_size, ddpm_lr_channels, n_steps).to(device)
     
     return unet, ddpm_net
@@ -225,24 +233,30 @@ def select_state_dict(checkpoint: Dict[str, Any]) -> Dict[str, Any]:
     return checkpoint
 
 
-def maybe_load_checkpoint(unet: nn.Module, ddpm_net: nn.Module, 
-                          cfg: Dict[str, Any], device: torch.device) -> None:
+def maybe_load_checkpoint(unet: Optional[nn.Module],
+                          ddpm_net: nn.Module,
+                          cfg: Dict[str, Any],
+                          device: torch.device,
+                          two_stage: bool = True) -> None:
     """加载预训练模型权重。"""
     model_cfg = cfg["model"]
     
-    # 加载 UNet 权重（必须，用于生成粗糙 HR）
-    unet_ckpt_path = model_cfg.get("unet_checkpoint")
-    if not unet_ckpt_path:
-        raise ValueError("unet_checkpoint is required for two-stage training")
-    
-    print(f"Loading UNet from {unet_ckpt_path}")
-    unet_checkpoint = torch.load(unet_ckpt_path, map_location=device)
-    unet_state_dict = select_state_dict(unet_checkpoint)
-    unet.load_state_dict(unet_state_dict)
-    unet.eval()  # UNet 冻结，不训练
-    for param in unet.parameters():
-        param.requires_grad = False
-    print("UNet loaded and frozen")
+    if two_stage:
+        # 加载 UNet 权重（必须，用于生成粗糙 HR）
+        unet_ckpt_path = model_cfg.get("unet_checkpoint")
+        if not unet_ckpt_path:
+            raise ValueError("unet_checkpoint is required for two-stage training")
+        
+        print(f"Loading UNet from {unet_ckpt_path}")
+        unet_checkpoint = torch.load(unet_ckpt_path, map_location=device)
+        unet_state_dict = select_state_dict(unet_checkpoint)
+        if unet is None:
+            raise ValueError("UNet model is not initialized.")
+        unet.load_state_dict(unet_state_dict)
+        unet.eval()  # UNet 冻结，不训练
+        for param in unet.parameters():
+            param.requires_grad = False
+        print("UNet loaded and frozen")
     
     # 加载 DDPM 权重（可选，用于继续训练）
     ddpm_ckpt_path = model_cfg.get("ddpm_checkpoint")
@@ -294,17 +308,19 @@ def create_dataloader(cfg: Dict[str, Any]) -> torch.utils.data.DataLoader:
 
 
 def train(ddpm: DDPM,
-          unet: nn.Module,
+          unet: Optional[nn.Module],
           ddpm_net: nn.Module,
           cfg: Dict[str, Any],
           device: torch.device,
           ckpt_path: Path,
           log_dir: Path,
-          log: Logger) -> nn.Module:
+          log: Logger,
+          two_stage: bool = True) -> nn.Module:
     data_cfg = cfg["data"]
     opt_cfg = cfg["optimization"]
     logging_cfg = cfg["logging"]
-    log.info("Training two-stage DDPM with frozen UNet backbone.")
+    stage_desc = "two-stage DDPM with frozen UNet backbone" if two_stage else "single-stage conditional DDPM (no UNet)"
+    log.info(f"Training {stage_desc}.")
 
     writer = SummaryWriter(log_dir=str(log_dir))
     
@@ -319,7 +335,10 @@ def train(ddpm: DDPM,
     log.info(f"Total samples: {total_samples}, steps per epoch: {len(dataloader)}, image size: {actual_image_size}x{actual_image_size}, HR channels: {sample_hr.shape[1]}, LR channels: {sample_lr.shape[1]}")
     
     # UNet 已经冻结，只训练 DDPM
-    unet.eval()
+    if two_stage:
+        if unet is None:
+            raise ValueError("UNet model is required for two-stage training.")
+        unet.eval()
     ddpm_net = ddpm_net.to(device).train()
     ema_net = deepcopy(ddpm_net).eval().requires_grad_(False)
 
@@ -370,10 +389,13 @@ def train(ddpm: DDPM,
                 hr_images = hr_images.to(device, non_blocking=True)
                 batch_size = hr_images.size(0)
 
-                # 生成粗糙 HR，作为 condition 的一部分
-                with torch.no_grad():
-                    coarse_hr = unet(lr_images)
-                condition = torch.cat([coarse_hr, lr_images], dim=1)
+                if two_stage:
+                    # 生成粗糙 HR，作为 condition 的一部分
+                    with torch.no_grad():
+                        coarse_hr = unet(lr_images)
+                    condition = torch.cat([coarse_hr, lr_images], dim=1)
+                else:
+                    condition = lr_images
 
                 # DDPM 前向过程：添加噪声
                 t = torch.randint(0,
@@ -418,9 +440,13 @@ def train(ddpm: DDPM,
                 preview_batch = min(preview_count, lr_images.size(0))
                 lr_subset = lr_images[:preview_batch]
                 
-                # 生成粗糙 HR
-                coarse_hr_subset = unet(lr_subset)
-                condition_subset = torch.cat([coarse_hr_subset, lr_subset], dim=1)
+                if two_stage:
+                    # 生成粗糙 HR
+                    coarse_hr_subset = unet(lr_subset)
+                    condition_subset = torch.cat([coarse_hr_subset, lr_subset], dim=1)
+                else:
+                    coarse_hr_subset = None
+                    condition_subset = lr_subset
                 
                 img_shape = get_image_shape_from_config(cfg)
                 img_net = ddpm.sample_backward_sr((preview_batch, *img_shape),
@@ -437,9 +463,7 @@ def train(ddpm: DDPM,
                 ddpm_net.train()
 
             hr_subset = hr_images[:preview_batch].cpu()
-            coarse_hr_cpu = coarse_hr_subset.cpu()
             lr01 = ((lr_subset.detach().cpu().clamp(-1, 1) + 1) / 2)
-            coarse01 = ((coarse_hr_cpu.detach().clamp(-1, 1) + 1) / 2)
             hr01 = ((hr_subset.clamp(-1, 1) + 1) / 2)
             net01 = ((img_net.detach().cpu().clamp(-1, 1) + 1) / 2)
             ema01 = ((img_ema.detach().cpu().clamp(-1, 1) + 1) / 2)
@@ -447,9 +471,12 @@ def train(ddpm: DDPM,
             writer.add_image(f'sample/epoch_{epoch + 1}_lr',
                              make_preview_grid(lr01, channels, preview_nrow),
                              epoch + 1)
-            writer.add_image(f'sample/epoch_{epoch + 1}_coarse',
-                             make_preview_grid(coarse01, 1, preview_nrow),
-                             epoch + 1)
+            if two_stage and coarse_hr_subset is not None:
+                coarse_hr_cpu = coarse_hr_subset.cpu()
+                coarse01 = ((coarse_hr_cpu.detach().clamp(-1, 1) + 1) / 2)
+                writer.add_image(f'sample/epoch_{epoch + 1}_coarse',
+                                 make_preview_grid(coarse01, 1, preview_nrow),
+                                 epoch + 1)
             writer.add_image(f'sample/epoch_{epoch + 1}_hr',
                              make_preview_grid(hr01, channels, preview_nrow),
                              epoch + 1)
@@ -516,8 +543,10 @@ def main() -> None:
     # 初始化 logger
     log = Logger(rank=0, log_dir="runs/logs")
     
+    single_stage = env_flag("SR_SINGLE_STAGE")
+    title = "Single-Stage DDPM Super-Resolution Trainer" if single_stage else "Two-Stage DDPM Super-Resolution Trainer"
     log.info("=======================================================")
-    log.info("        Two-Stage DDPM Super-Resolution Trainer")
+    log.info(f"        {title}")
     log.info("=======================================================")
     
     # 如果有用户输入，写入日志开头
@@ -543,10 +572,14 @@ def main() -> None:
     else:
         log.info("使用单通道作为低分辨率输入.")
 
+    two_stage = not single_stage
     # 构建两个模型：UNet 和 DDPM
-    unet, ddpm_net = build_models(cfg, device)
-    maybe_load_checkpoint(unet, ddpm_net, cfg, device)
-    log.info("Initialized two-stage model: frozen UNet + trainable DDPM.")
+    unet, ddpm_net = build_models(cfg, device, two_stage=two_stage)
+    maybe_load_checkpoint(unet, ddpm_net, cfg, device, two_stage=two_stage)
+    if two_stage:
+        log.info("Initialized two-stage model: frozen UNet + trainable DDPM.")
+    else:
+        log.info("Initialized single-stage model: DDPM conditioned on LR.")
 
     n_steps = cfg["model"]["diffusion_steps"]
     ddpm = DDPM(device, n_steps)
@@ -561,7 +594,7 @@ def main() -> None:
     log_dir = log_root / f"{timestamp}-{log_cfg.get('experiment_name', 'sr-train')}"
     ensure_dir(log_dir)
     
-    train(ddpm, unet, ddpm_net, cfg, device, ckpt_path, log_dir, log)
+    train(ddpm, unet, ddpm_net, cfg, device, ckpt_path, log_dir, log, two_stage=two_stage)
     
     # 训练结束后保存配置文件（记录实际完成的训练）
     cfg_copy_path = log_dir / "train_config.json"
