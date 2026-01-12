@@ -1,14 +1,7 @@
 """Simple VAE finetune script.
 
 Example (PowerShell):
-    python vae_finetune.py `
-      --h5_path data/output_merge/train.h5 `
-      --vae_path SR/sd-vae-ft-mse `
-      --output_dir SR/vae_ft `
-      --epochs 5 `
-      --batch_size 2 `
-      --lr 1e-5 `
-      --kl_weight 1e-6
+    python vae_finetune.py --h5_path data/output_merge/train_1.h5 --vae_path SR/sd-vae-ft-mse --output_dir SR/vae_ft --epochs 50 --batch_size 4 --lr 1e-5 --kl_weight 1e-6
 
 Example (HR + I only):
     python vae_finetune.py `
@@ -241,10 +234,12 @@ def train() -> None:
 
     vae = AutoencoderKL.from_pretrained(args.vae_path)
     vae.to(device).train()
+    
+    # 启用梯度检查点以节省显存
+    vae.enable_gradient_checkpointing()
 
     optimizer = torch.optim.AdamW(vae.parameters(), lr=args.lr)
-    scaler = torch.cuda.amp.GradScaler(enabled=args.amp and device.type == "cuda")
-    autocast_ctx = torch.cuda.amp.autocast if device.type == "cuda" else contextlib.nullcontext
+    scaler = torch.amp.GradScaler(enabled=args.amp and device.type == "cuda")
 
     print(f"samples: {len(dataset)}")
     print(f"device: {device}")
@@ -257,8 +252,8 @@ def train() -> None:
             batch = batch.to(device)
             optimizer.zero_grad(set_to_none=True)
 
-            with autocast_ctx(enabled=args.amp and device.type == "cuda"):
-                posterior = vae.encode(batch)
+            with torch.amp.autocast(device_type=device.type, enabled=args.amp):
+                posterior = vae.encode(batch).latent_dist
                 z = posterior.sample()
                 recon = vae.decode(z).sample
                 recon_loss = F.mse_loss(recon, batch)
@@ -295,4 +290,3 @@ def train() -> None:
 
 if __name__ == "__main__":
     train()
-
