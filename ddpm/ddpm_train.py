@@ -13,6 +13,7 @@ import torch
 import torch.nn as nn
 from matplotlib import cm
 from PIL import Image
+from torch.utils.data import DataLoader, random_split
 from torch.utils.tensorboard import SummaryWriter
 from torchvision.utils import make_grid
 
@@ -307,6 +308,39 @@ def create_dataloader(cfg: Dict[str, Any]) -> torch.utils.data.DataLoader:
 
 
 
+def create_train_val_loaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, Optional[DataLoader]]:
+    data_cfg = cfg["data"]
+    base_loader = create_dataloader(cfg)
+    dataset = base_loader.dataset
+    val_ratio = float(data_cfg.get("val_ratio", 0.0))
+    if val_ratio <= 0.0 or len(dataset) < 2:
+        return base_loader, None
+
+    n_val = int(len(dataset) * val_ratio)
+    n_val = max(1, min(n_val, len(dataset) - 1))
+    n_train = len(dataset) - n_val
+    seed = cfg.get("seed")
+    generator = None if seed is None else torch.Generator().manual_seed(int(seed))
+    train_set, val_set = random_split(dataset, [n_train, n_val], generator=generator)
+
+    num_workers = data_cfg.get("num_workers", 4)
+    train_loader = DataLoader(
+        train_set,
+        batch_size=data_cfg["batch_size"],
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=True,
+    )
+    val_loader = DataLoader(
+        val_set,
+        batch_size=data_cfg.get("val_batch_size", data_cfg["batch_size"]),
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True,
+    )
+    return train_loader, val_loader
+
+
 def train(ddpm: DDPM,
           unet: Optional[nn.Module],
           ddpm_net: nn.Module,
@@ -324,15 +358,19 @@ def train(ddpm: DDPM,
 
     writer = SummaryWriter(log_dir=str(log_dir))
     
-    dataloader = create_dataloader(cfg)
-    total_samples = len(dataloader.dataset)
+    train_loader, val_loader = create_train_val_loaders(cfg)
+    total_samples = len(train_loader.dataset)
+    val_samples = len(val_loader.dataset) if val_loader is not None else 0
     
     # 获取实际图像尺寸
-    sample_lr, sample_hr, _ = next(iter(dataloader))
+    sample_lr, sample_hr, _ = next(iter(train_loader))
     actual_image_size = sample_hr.shape[-1]
     
     log.info(f"Start training, batch size: {data_cfg['batch_size']}, epochs: {opt_cfg['epochs']}")
-    log.info(f"Total samples: {total_samples}, steps per epoch: {len(dataloader)}, image size: {actual_image_size}x{actual_image_size}, HR channels: {sample_hr.shape[1]}, LR channels: {sample_lr.shape[1]}")
+    if val_loader is None:
+        log.info(f"Total samples: {total_samples}, steps per epoch: {len(train_loader)}, image size: {actual_image_size}x{actual_image_size}, HR channels: {sample_hr.shape[1]}, LR channels: {sample_lr.shape[1]}")
+    else:
+        log.info(f"Total samples: {total_samples}, val samples: {val_samples}, steps per epoch: {len(train_loader)}, image size: {actual_image_size}x{actual_image_size}, HR channels: {sample_hr.shape[1]}, LR channels: {sample_lr.shape[1]}")
     
     # UNet 已经冻结，只训练 DDPM
     if two_stage:
@@ -383,7 +421,7 @@ def train(ddpm: DDPM,
                       warmup_epoch=warmup_epochs)
 
         # 使用 Rich Progress 进度条
-        with log.progress_bar(dataloader, desc=f"Epoch {epoch + 1}/{epochs}") as pbar:
+        with log.progress_bar(train_loader, desc=f"Epoch {epoch + 1}/{epochs}") as pbar:
             for lr_images, hr_images, _ in pbar:
                 lr_images = lr_images.to(device, non_blocking=True)
                 hr_images = hr_images.to(device, non_blocking=True)
@@ -431,6 +469,43 @@ def train(ddpm: DDPM,
                 total_loss += loss.item() * batch_size
                 ema_update(ema_net, ddpm_net, decay=opt_cfg["ema_decay"])
                 pbar.update_postfix(loss=f"{loss.item():.4f}")
+
+        avg_val_loss = None
+        if val_loader is not None:
+            net_was_training = ddpm_net.training
+            ddpm_net.eval()
+            val_loss = 0.0
+            with torch.inference_mode():
+                for lr_images, hr_images, _ in val_loader:
+                    lr_images = lr_images.to(device, non_blocking=True)
+                    hr_images = hr_images.to(device, non_blocking=True)
+                    batch_size = hr_images.size(0)
+
+                    if two_stage:
+                        coarse_hr = unet(lr_images)
+                        condition = torch.cat([coarse_hr, lr_images], dim=1)
+                    else:
+                        condition = lr_images
+
+                    t = torch.randint(0,
+                                      ddpm.n_steps,
+                                      size=(batch_size, ),
+                                      device=device)
+                    eps = torch.randn_like(hr_images)
+                    x_t = ddpm.sample_forward(hr_images, t, eps)
+
+                    with torch.amp.autocast(device_type=device.type,
+                                            dtype=amp_dtype,
+                                            enabled=use_amp
+                                            and device.type == "cuda"):
+                        eps_pred = ddpm_net(x_t, t, condition)
+                        loss = loss_fn(eps_pred, eps)
+
+                    val_loss += loss.item() * batch_size
+            avg_val_loss = val_loss / len(val_loader.dataset)
+            writer.add_scalar('val/loss', avg_val_loss, epoch + 1)
+            if net_was_training:
+                ddpm_net.train()
 
         if epoch % preview_interval == 0:
             net_was_training = ddpm_net.training
@@ -487,19 +562,27 @@ def train(ddpm: DDPM,
                              make_preview_grid(ema01, channels, preview_nrow),
                              epoch + 1)
 
-        avg_loss = total_loss / len(dataloader.dataset)
+        avg_loss = total_loss / len(train_loader.dataset)
         current_lr = optimizer.param_groups[0]['lr']
         writer.add_scalar('train/loss', avg_loss, epoch + 1)
         writer.add_scalar('train/learning_rate', current_lr, epoch + 1)
 
         toc = time.time()
-        log.info(
-            f"Epoch {epoch + 1}/{epochs} finished. "
-            f"Average loss: {avg_loss:.6f}. "
-            f"LR: {current_lr:.2e}")
+        if avg_val_loss is None:
+            log.info(
+                f"Epoch {epoch + 1}/{epochs} finished. "
+                f"Average loss: {avg_loss:.6f}. "
+                f"LR: {current_lr:.2e}")
+        else:
+            log.info(
+                f"Epoch {epoch + 1}/{epochs} finished. "
+                f"Train loss: {avg_loss:.6f}. "
+                f"Val loss: {avg_val_loss:.6f}. "
+                f"LR: {current_lr:.2e}")
 
-        if avg_loss < best_loss:
-            best_loss = avg_loss
+        metric_loss = avg_val_loss if avg_val_loss is not None else avg_loss
+        if metric_loss < best_loss:
+            best_loss = metric_loss
             best_loss_epoch = epoch + 1
             model_best_state_dict = deepcopy(ddpm_net.state_dict())
             ema_model_best_state_dict = deepcopy(ema_net.state_dict())

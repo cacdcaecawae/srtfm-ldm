@@ -3,6 +3,8 @@
   "device": "cuda",
   "data": {
     "batch_size": 32,
+    "val_ratio": 0.1,
+    "val_batch_size": 32,
     "num_workers": 4,
     "image_size": 400,
     "channels": 1,
