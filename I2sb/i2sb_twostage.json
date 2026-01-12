@@ -1,0 +1,52 @@
+{
+  "seed": 42,
+  "device": "cuda",
+  "data": {
+    "batch_size": 16,
+    "num_workers": 4,
+    "image_size": 400,
+    "channels": 1,
+    "h5_path": "./data/output_merge/train.h5",
+    "h5_lr_key": "TFM",
+    "h5_hr_key": "hr",
+    "h5_lr_dataset": "intensity",
+    "transpose_lr": true,
+    "transpose_hr": true,
+    "use_tfm_channels": true,
+    "coord_range_x": [-0.012000, 0.012000],
+    "coord_range_y": [0.001000, 0.039000],
+    "augment": true,
+    "h_flip_prob": 0.5,
+    "translate_prob": 0.5,
+    "max_translate_ratio": 0.05
+  },
+  "model": {
+    "module": "network",
+    "unet_backbone": "unet_res",
+    "i2sb_backbone": "unet_res_diffusion",
+    "diffusion_steps": 1000,
+    "t0": 0.0001,
+    "T": 1.0,
+    "unet_checkpoint": "SR/weight_ckpt/unetonly-0105.pth",
+    "checkpoint_dir": "SR/weight_ckpt",
+    "checkpoint_name": "i2sb_tfm_refine_base.pth"
+  },
+  "optimization": {
+    "epochs": 500,
+    "ema_decay": 0.9999,
+    "learning_rate": 1e-4,
+    "betas": [0.9, 0.999],
+    "weight_decay": 0.0,
+    "warmup_epochs": 50,
+    "lr_min": 1e-6,
+    "lr_max": 5e-4,
+    "amp": true,
+    "amp_dtype": "bfloat16"
+  },
+  "logging": {
+    "tensorboard_root": "runs",
+    "experiment_name": "i2sb-tfm-baseline",
+    "sample_interval": 10,
+    "num_preview_samples": 4
+  }
+}

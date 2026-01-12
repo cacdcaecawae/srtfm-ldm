@@ -1,0 +1,19 @@
+# Deep Learning Framework
+torch>=2.0.0
+torchvision>=0.15.0
+
+# Data Processing & Visualization
+numpy>=1.24.0
+matplotlib>=3.7.0
+pillow>=9.5.0
+h5py>=3.8.0
+
+# Metrics & Evaluation
+torchmetrics>=0.11.0
+
+# Progress & Logging
+tqdm>=4.65.0
+tensorboard>=2.13.0
+
+# Utilities
+rich>=13.0.0

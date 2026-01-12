@@ -1,0 +1,300 @@
+import argparse
+import csv
+import json
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
+import torch
+from PIL import Image
+from tqdm import tqdm
+from torchmetrics.functional import (peak_signal_noise_ratio,
+                                     structural_similarity_index_measure)
+from matplotlib import cm
+
+import sys
+sys.path.insert(0, str(Path(__file__).parent))
+
+from dataset import get_h5_dataloader
+from network.network import build_network, unet_res_cfg
+
+JET_PALETTE: List[int] = (
+    (cm.jet(np.linspace(0.0, 1.0, 256))[:, :3] * 255.0)
+    .astype(np.uint8)
+    .reshape(-1)
+    .tolist()
+)
+
+MODEL_CONFIGS: Dict[str, Dict[str, Any]] = {
+    "unet_res": unet_res_cfg,
+}
+
+DEFAULT_CONFIG_PATH = Path("eval.json")
+
+
+def load_config(path: Path) -> Dict[str, Any]:
+    with path.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def resolve_device(preferred: Optional[str]) -> torch.device:
+    if preferred is None:
+        preferred = "cuda" if torch.cuda.is_available() else "cpu"
+    device = torch.device(preferred)
+    if device.type == "cuda" and not torch.cuda.is_available():
+        device = torch.device("cpu")
+    return device
+
+
+def ensure_dir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def create_dataloader(cfg: Dict[str, Any]) -> torch.utils.data.DataLoader:
+    """创建数据加载器"""
+    coord_range = None
+    if cfg.get("use_tfm_channels", False):
+        coord_range_x = tuple(cfg["coord_range_x"]) if "coord_range_x" in cfg else (-1.0, 1.0)
+        coord_range_y = tuple(cfg["coord_range_y"]) if "coord_range_y" in cfg else (-1.0, 1.0)
+        coord_range = (coord_range_x, coord_range_y)
+    
+    return get_h5_dataloader(
+        h5_path=cfg["h5_path"],
+        batch_size=cfg["batch_size"],
+        lr_key=cfg.get("h5_lr_key", "TFM"),
+        hr_key=cfg.get("h5_hr_key", "hr"),
+        lr_dataset_name=cfg.get("h5_lr_dataset"),
+        hr_dataset_name=cfg.get("h5_hr_dataset"),
+        transpose_lr=cfg.get("transpose_lr", False),
+        transpose_hr=cfg.get("transpose_hr", False),
+        use_tfm_channels=cfg.get("use_tfm_channels", False),
+        coord_range=coord_range,
+        augment=False,
+        num_workers=cfg.get("num_workers", 4),
+        shuffle=False,
+    )
+
+
+def build_model(cfg: Dict[str, Any], device: torch.device) -> torch.nn.Module:
+    """构建模型"""
+    model_cfg = cfg["model"]
+    data_cfg = cfg["data"]
+    backbone_key = model_cfg["backbone"]
+    
+    if backbone_key not in MODEL_CONFIGS:
+        raise KeyError(f"Unknown backbone '{backbone_key}'. "
+                       f"Available: {', '.join(MODEL_CONFIGS)}")
+    
+    net_cfg = MODEL_CONFIGS[backbone_key].copy()
+    
+    in_channels = data_cfg["channels"]
+    image_size = data_cfg["image_size"]
+    
+    lr_channels = in_channels
+    if data_cfg.get("use_tfm_channels", False):
+        lr_channels = 3
+    
+    model = build_network(net_cfg,
+                          in_channels=in_channels,
+                          image_size=image_size,
+                          lr_channels=lr_channels).to(device)
+    
+    checkpoint = torch.load(model_cfg["checkpoint_path"], map_location=device)
+    state_dict = checkpoint.get("model_best_state_dict",
+                                checkpoint.get("model_state_dict", checkpoint))
+    model.load_state_dict(state_dict)
+    model.eval()
+    print(f"Loaded model from {model_cfg['checkpoint_path']}")
+    return model
+
+
+def denormalize(tensor: torch.Tensor) -> torch.Tensor:
+    """反归一化到 [0, 1]"""
+    return tensor.clamp(-1, 1).add(1).div(2)
+
+
+def compute_iou(pred: torch.Tensor, target: torch.Tensor, threshold: float = 0.5) -> float:
+    """
+    计算IoU (Intersection over Union)
+    
+    Args:
+        pred: 预测张量 [C, H, W] 或 [B, C, H, W]，值域 [0, 1]
+        target: 目标张量，形状与pred相同
+        threshold: 二值化阈值
+    
+    Returns:
+        IoU值
+    """
+    # 二值化
+    pred_binary = (pred > threshold).float()
+    target_binary = (target > threshold).float()
+    
+    # 计算交集和并集
+    intersection = (pred_binary * target_binary).sum()
+    union = pred_binary.sum() + target_binary.sum() - intersection
+    
+    # 避免除零
+    if union == 0:
+        return 1.0 if intersection == 0 else 0.0
+    
+    iou = intersection / union
+    return iou.item()
+
+
+def tensor_to_image(tensor: torch.Tensor,
+                    apply_jet: bool = False) -> Image.Image:
+    """将张量转换为 PIL Image"""
+    array = tensor.permute(1, 2, 0).cpu().numpy()
+    array = np.clip(array, 0.0, 1.0)
+    if apply_jet:
+        if array.shape[2] == 1:
+            gray_np = array[:, :, 0]
+        else:
+            gray_np = array.mean(axis=2)
+        gray_uint8 = (gray_np * 255.0).astype(np.uint8)
+        jet_image = Image.fromarray(gray_uint8, mode="P")
+        jet_image.putpalette(JET_PALETTE)
+        return jet_image
+    array = (array * 255.0).astype(np.uint8)
+    if array.shape[2] == 1:
+        return Image.fromarray(array[:, :, 0], mode='L')
+    return Image.fromarray(array)
+
+
+def evaluate(cfg: Dict[str, Any], device: torch.device) -> None:
+    """执行 UNetonly 评估"""
+    data_cfg = cfg["data"]
+    sampler_cfg = cfg.get("sampler", {})
+    
+    dataloader = create_dataloader(data_cfg)
+    net = build_model(cfg, device)
+    
+    use_jet = data_cfg.get("channels", 1) == 1
+    
+    output_root = Path(cfg["output"]["root"])
+    images_dir = output_root / "images"
+    ensure_dir(images_dir)
+    ensure_dir(output_root)
+    
+    # 推理配置
+    seed = sampler_cfg.get("seed", 1234)
+    threshold = sampler_cfg.get("threshold", 0.05)
+    print("Direct UNet inference")
+    
+    psnr_scores = []
+    ssim_scores = []
+    iou_scores = []
+    per_image_results = []
+    
+    with torch.inference_mode():
+        for lr_images, hr_images, names in tqdm(dataloader, desc="Evaluating"):
+            torch.manual_seed(seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(seed)
+            
+            lr_images = lr_images.to(device)
+            hr_images = hr_images.to(device)
+            
+            sr_images = net(lr_images)
+            
+            # 反归一化
+            sr_for_metric = denormalize(sr_images)
+            
+            # 阈值处理
+            sr_for_metric = torch.where(
+                sr_for_metric < threshold,
+                torch.zeros_like(sr_for_metric),
+                sr_for_metric
+            )
+            
+            # 压缩到 [0, 227/253]
+            sr_for_image = sr_for_metric# * (227.0 / 253.0)
+            
+            hr_for_metric = denormalize(hr_images)
+            
+            # 计算指标
+            for idx, name in enumerate(names):
+                pred = sr_for_metric[idx].unsqueeze(0)
+                target = hr_for_metric[idx].unsqueeze(0)
+                
+                psnr = peak_signal_noise_ratio(pred, target, data_range=1.0)
+                ssim = structural_similarity_index_measure(pred, target, data_range=1.0)
+                iou = compute_iou(pred, target, threshold=threshold)
+                
+                psnr_scores.append(psnr.item())
+                ssim_scores.append(ssim.item())
+                iou_scores.append(iou)
+                per_image_results.append({
+                    "filename": name,
+                    "psnr": psnr.item(),
+                    "ssim": ssim.item(),
+                    "iou": iou,
+                })
+                
+                # 保存图像
+                if cfg["output"].get("save_images", True):
+                    if not any(name.endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff']):
+                        image_filename = f"{name}.png"
+                    else:
+                        image_filename = name
+                    tensor_to_image(sr_for_image[idx],
+                                    apply_jet=use_jet).save(images_dir / image_filename)
+    
+    # 计算统计指标（平均、最大、最小）
+    avg_psnr = float(np.mean(psnr_scores)) if psnr_scores else 0.0
+    max_psnr = float(np.max(psnr_scores)) if psnr_scores else 0.0
+    min_psnr = float(np.min(psnr_scores)) if psnr_scores else 0.0
+    
+    avg_ssim = float(np.mean(ssim_scores)) if ssim_scores else 0.0
+    max_ssim = float(np.max(ssim_scores)) if ssim_scores else 0.0
+    min_ssim = float(np.min(ssim_scores)) if ssim_scores else 0.0
+    
+    avg_iou = float(np.mean(iou_scores)) if iou_scores else 0.0
+    max_iou = float(np.max(iou_scores)) if iou_scores else 0.0
+    min_iou = float(np.min(iou_scores)) if iou_scores else 0.0
+    
+    print(f"PSNR - 平均: {avg_psnr:.4f}, 最大: {max_psnr:.4f}, 最小: {min_psnr:.4f}")
+    print(f"SSIM - 平均: {avg_ssim:.4f}, 最大: {max_ssim:.4f}, 最小: {min_ssim:.4f}")
+    print(f"IoU  - 平均: {avg_iou:.4f}, 最大: {max_iou:.4f}, 最小: {min_iou:.4f}")
+    
+    # 保存结果
+    results_txt = output_root / "results.txt"
+    data_source = cfg["data"].get("h5_path", "N/A")
+    with results_txt.open("w", encoding="utf-8") as handle:
+        handle.write("UNetonly Evaluation Summary\n")
+        handle.write("======================\n")
+        handle.write(f"Model: {cfg['model']['checkpoint_path']}\n")
+        handle.write(f"Dataset: {data_source}\n")
+        handle.write("\n")
+        handle.write(f"PSNR - Average: {avg_psnr:.4f}, Max: {max_psnr:.4f}, Min: {min_psnr:.4f}\n")
+        handle.write(f"SSIM - Average: {avg_ssim:.4f}, Max: {max_ssim:.4f}, Min: {min_ssim:.4f}\n")
+        handle.write(f"IoU  - Average: {avg_iou:.4f}, Max: {max_iou:.4f}, Min: {min_iou:.4f}\n")
+    
+    results_csv = output_root / "results_per_image.csv"
+    with results_csv.open("w", newline="", encoding="utf-8") as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=["filename", "psnr", "ssim", "iou"])
+        writer.writeheader()
+        writer.writerows(per_image_results)
+    
+    print(f"Results saved to {output_root}")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Evaluate UNet SR model.")
+    parser.add_argument("--config",
+                        type=Path,
+                        default=DEFAULT_CONFIG_PATH,
+                        help="Path to UNetonly evaluation configuration JSON file.")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    cfg = load_config(args.config)
+    device = resolve_device(cfg.get("device"))
+    print(f"Using device: {device}")
+    evaluate(cfg, device)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,38 @@
+{
+  "device": "cuda",
+  "data": {
+    "batch_size": 1,
+    "num_workers": 4,
+    "image_size": 400,
+    "channels": 1,
+    "h5_path": "./data/output_merge/eval.h5",
+    "h5_lr_key": "TFM",
+    "h5_hr_key": "hr",
+    "h5_lr_dataset": "intensity",
+    "transpose_lr": true,
+    "transpose_hr": true,
+    "use_tfm_channels": true,
+    "coord_range_x": [-0.012000, 0.012000],
+    "coord_range_y": [0.001000, 0.039000]
+  },
+  "model": {
+    "module": "network",
+    "unet_backbone": "unet_res",
+    "ddpm_backbone": "unet_res_diffusion",
+    "diffusion_steps": 1000,
+    "unet_checkpoint": "SR/weight_ckpt/unetonly-0107.pth",
+    "ddpm_checkpoint": "SR/weight_ckpt/ddpm_tfm_refine_base.pth"
+  },
+  "sampler": {
+    "threshold": 0.95,
+    "type": "ddim",
+    "ddim_steps": 100,
+    "eta": 1.0,
+    "seed": 1234,
+    "simple_var": false
+  },
+  "output": {
+    "root": "SR/eval_results_ddpm",
+    "save_images": true
+  }
+}

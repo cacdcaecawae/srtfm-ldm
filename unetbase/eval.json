@@ -1,0 +1,31 @@
+{
+  "device": "cuda",
+  "data": {
+    "batch_size": 1,
+    "num_workers": 4,
+    "image_size": 400,
+    "channels": 1,
+    "h5_path": "./data/output_merge/eval.h5",
+    "h5_lr_key": "TFM",
+    "h5_hr_key": "hr",
+    "h5_lr_dataset": "intensity",
+    "transpose_lr": true,
+    "transpose_hr": true,
+    "use_tfm_channels": true,
+    "coord_range_x": [-0.012000, 0.012000],
+    "coord_range_y": [0.001000, 0.039000]
+  },
+  "model": {
+    "module": "network",
+    "backbone": "unet_res",
+    "checkpoint_path": "./SR/weight_ckpt/unetonly-0107.pth"
+  },
+  "sampler": {
+    "threshold": 0.5,
+    "seed": 1234
+  },
+  "output": {
+    "root": "SR/eval_results_unetonly_0107",
+    "save_images": true
+  }
+}
