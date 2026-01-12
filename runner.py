@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parent
 
 PIPELINE_SCRIPTS: Dict[Tuple[str, str], Path] = {
     ("train", "unet"): ROOT / "unetbase" / "unetonly_train.py",
-    ("eval", "unet"): ROOT / "eval.py",
+    ("eval", "unet"): ROOT / "unetbase" / "eval.py",
     ("train", "ddpm"): ROOT / "ddpm" / "ddpm_train.py",
     ("eval", "ddpm"): ROOT / "ddpm" / "ddpm_eval.py",
     ("train", "ddpm-single"): ROOT / "ddpm" / "ddpm_train.py",
