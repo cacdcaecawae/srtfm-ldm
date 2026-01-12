@@ -35,7 +35,7 @@ MODEL_CONFIGS: Dict[str, Dict[str, Any]] = {
     "unet_res_diffusion": unet_res_diffusion_cfg,
 }
 
-DEFAULT_CONFIG_PATH = Path("configs/ddpm_eval.json")
+DEFAULT_CONFIG_PATH = Path(__file__).with_name("ddpm_eval.json")
 
 
 def load_config(path: Path) -> Dict[str, Any]:

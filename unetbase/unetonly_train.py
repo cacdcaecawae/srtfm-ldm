@@ -24,7 +24,7 @@ MODEL_CONFIGS: Dict[str, Dict[str, Any]] = {
     "unet_res": unet_res_cfg,
 }
 
-DEFAULT_CONFIG_PATH = Path("train.json")
+DEFAULT_CONFIG_PATH = Path(__file__).with_name("train.json")
 
 
 def load_config(path: Path) -> Dict[str, Any]:

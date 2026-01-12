@@ -30,7 +30,7 @@ MODEL_CONFIGS: Dict[str, Dict[str, Any]] = {
     "unet_res_diffusion": unet_res_diffusion_cfg,
 }
 
-DEFAULT_CONFIG_PATH = Path("configs/i2sb_twostage.json")
+DEFAULT_CONFIG_PATH = Path(__file__).with_name("i2sb_twostage.json")
 
 
 def load_config(path: Path) -> Dict[str, Any]:
