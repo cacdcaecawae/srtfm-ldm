@@ -10,4 +10,5 @@ runs/
 SR/
 work_dirs/
 data/
+vae_compression_vis/
 *.tmp
