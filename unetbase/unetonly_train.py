@@ -317,6 +317,13 @@ def train(net: nn.Module,
         log.info(f"Total samples: {total_samples}, steps per epoch: {len(train_loader)}, image size: {actual_image_size}x{actual_image_size}, HR channels: {sample_hr.shape[1]}, LR channels: {sample_lr.shape[1]}")
     else:
         log.info(f"Total samples: {total_samples}, val samples: {val_samples}, steps per epoch: {len(train_loader)}, image size: {actual_image_size}x{actual_image_size}, HR channels: {sample_hr.shape[1]}, LR channels: {sample_lr.shape[1]}")
+    
+    # 多GPU支持
+    use_multi_gpu = cfg.get("multi_gpu", False)
+    if use_multi_gpu and torch.cuda.device_count() > 1:
+        log.info(f"Using DataParallel with {torch.cuda.device_count()} GPUs")
+        net = nn.DataParallel(net)
+    
     net = net.to(device).train()
     ema_net = deepcopy(net).eval().requires_grad_(False)
 
@@ -469,8 +476,11 @@ def train(net: nn.Module,
         if metric_loss < best_loss:
             best_loss = metric_loss
             best_loss_epoch = epoch + 1
-            model_best_state_dict = deepcopy(net.state_dict())
-            ema_model_best_state_dict = deepcopy(ema_net.state_dict())
+            # 保存时去掉DataParallel的module.前缀
+            model_state = net.module.state_dict() if isinstance(net, nn.DataParallel) else net.state_dict()
+            ema_state = ema_net.module.state_dict() if isinstance(ema_net, nn.DataParallel) else ema_net.state_dict()
+            model_best_state_dict = deepcopy(model_state)
+            ema_model_best_state_dict = deepcopy(ema_state)
 
             ckpt_best = {
                 'epoch': best_loss_epoch,
@@ -484,11 +494,15 @@ def train(net: nn.Module,
             torch.save(ckpt_best, tmp_best)
             safe_replace(tmp_best, best_path)
 
+        # 保存时去掉DataParallel的module.前缀
+        model_state = net.module.state_dict() if isinstance(net, nn.DataParallel) else net.state_dict()
+        ema_state = ema_net.module.state_dict() if isinstance(ema_net, nn.DataParallel) else ema_net.state_dict()
+        
         ckpt = {
             'epoch': epoch + 1,
             'ema_decay': opt_cfg["ema_decay"],
-            'model_state_dict': net.state_dict(),
-            'ema_model_state_dict': ema_net.state_dict(),
+            'model_state_dict': model_state,
+            'ema_model_state_dict': ema_state,
             'optimizer_state_dict': optimizer.state_dict(),
             'best_loss': best_loss,
             'best_loss_epoch': best_loss_epoch,
@@ -573,3 +587,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+    # 仅使用GPU 0和1
+    # $env:CUDA_VISIBLE_DEVICES="0,1"
+    # python runner.py train unet

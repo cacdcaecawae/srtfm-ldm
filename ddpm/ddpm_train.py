@@ -377,6 +377,15 @@ def train(ddpm: DDPM,
         if unet is None:
             raise ValueError("UNet model is required for two-stage training.")
         unet.eval()
+    
+    # 多GPU支持
+    use_multi_gpu = cfg.get("multi_gpu", False)
+    if use_multi_gpu and torch.cuda.device_count() > 1:
+        log.info(f"Using DataParallel with {torch.cuda.device_count()} GPUs")
+        ddpm_net = nn.DataParallel(ddpm_net)
+        if two_stage and unet is not None:
+            unet = nn.DataParallel(unet)
+    
     ddpm_net = ddpm_net.to(device).train()
     ema_net = deepcopy(ddpm_net).eval().requires_grad_(False)
 
@@ -584,8 +593,11 @@ def train(ddpm: DDPM,
         if metric_loss < best_loss:
             best_loss = metric_loss
             best_loss_epoch = epoch + 1
-            model_best_state_dict = deepcopy(ddpm_net.state_dict())
-            ema_model_best_state_dict = deepcopy(ema_net.state_dict())
+            # 保存时去除DataParallel的module.前缀
+            model_state = ddpm_net.module.state_dict() if isinstance(ddpm_net, nn.DataParallel) else ddpm_net.state_dict()
+            ema_state = ema_net.module.state_dict() if isinstance(ema_net, nn.DataParallel) else ema_net.state_dict()
+            model_best_state_dict = deepcopy(model_state)
+            ema_model_best_state_dict = deepcopy(ema_state)
 
             ckpt_best = {
                 'epoch': best_loss_epoch,
@@ -599,11 +611,15 @@ def train(ddpm: DDPM,
             torch.save(ckpt_best, tmp_best)
             safe_replace(tmp_best, best_path)
 
+        # 保存时去除DataParallel的module.前缀
+        model_state = ddpm_net.module.state_dict() if isinstance(ddpm_net, nn.DataParallel) else ddpm_net.state_dict()
+        ema_state = ema_net.module.state_dict() if isinstance(ema_net, nn.DataParallel) else ema_net.state_dict()
+        
         ckpt = {
             'epoch': epoch + 1,
             'ema_decay': opt_cfg["ema_decay"],
-            'model_state_dict': ddpm_net.state_dict(),
-            'ema_model_state_dict': ema_net.state_dict(),
+            'model_state_dict': model_state,
+            'ema_model_state_dict': ema_state,
             'best_loss': best_loss,
             'best_loss_epoch': best_loss_epoch,
             'model_best_state_dict': model_best_state_dict,

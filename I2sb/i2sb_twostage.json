@@ -1,6 +1,7 @@
 {
   "seed": 42,
   "device": "cuda",
+  "multi_gpu": false,
   "data": {
     "batch_size": 16,
     "val_ratio": 0.1,
