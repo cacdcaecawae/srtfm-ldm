@@ -523,13 +523,13 @@ def train(ddpm: DDPM,
             ddpm_net.eval()
             val_loss = 0.0
             with torch.inference_mode():
-                for lr_images, hr_images, _ in val_loader:
-                    lr_images = lr_images.to(device, non_blocking=True)
-                    hr_images = hr_images.to(device, non_blocking=True)
-                    batch_size = hr_images.size(0)
+                for val_lr_images, val_hr_images, _ in val_loader:
+                    val_lr_images = val_lr_images.to(device, non_blocking=True)
+                    val_hr_images = val_hr_images.to(device, non_blocking=True)
+                    batch_size = val_hr_images.size(0)
 
-                    hr_latent = encode_latent(vae, hr_images, vae_scale, sample=True)
-                    condition = build_condition_latent(vae, lr_images, vae_scale, use_tfm_channels)
+                    hr_latent = encode_latent(vae, val_hr_images, vae_scale, sample=True)
+                    condition = build_condition_latent(vae, val_lr_images, vae_scale, use_tfm_channels)
 
                     t = torch.randint(
                         0, ddpm.n_steps, size=(batch_size,), device=device

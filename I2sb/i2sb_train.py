@@ -1,4 +1,4 @@
-import json
+﻿import json
 import math
 import os
 import random
@@ -516,32 +516,32 @@ def train(diffusion: Diffusion,
             i2sb_net.eval()
             val_loss = 0.0
             with torch.inference_mode():
-                for tfm, hr_images, _ in val_loader:
-                    tfm = tfm.to(device, non_blocking=True)
-                    hr_images = hr_images.to(device, non_blocking=True)
-                    batch_size = hr_images.size(0)
+                for val_tfm, val_hr_images, _ in val_loader:
+                    val_tfm = val_tfm.to(device, non_blocking=True)
+                    val_hr_images = val_hr_images.to(device, non_blocking=True)
+                    batch_size = val_hr_images.size(0)
 
                     if two_stage:
-                        coarse_hr = unet(tfm)
-                        condition = torch.cat([coarse_hr, tfm], dim=1)
+                        coarse_hr = unet(val_tfm)
+                        condition = torch.cat([coarse_hr, val_tfm], dim=1)
                         bridge_start = coarse_hr
                     else:
-                        condition = tfm
-                        bridge_start = tfm[:, :1] if tfm.shape[1] > 1 else tfm
+                        condition = val_tfm
+                        bridge_start = val_tfm[:, :1] if val_tfm.shape[1] > 1 else val_tfm
 
                     t = torch.randint(0,
                                       n_steps, (batch_size,),
                                       device=device,
                                       dtype=torch.long)
-                    x_t = diffusion.q_sample(t, hr_images, bridge_start)
+                    x_t = diffusion.q_sample(t, val_hr_images, bridge_start)
 
                     with torch.amp.autocast(device_type=device.type,
                                             dtype=amp_dtype,
                                             enabled=use_amp
                                             and device.type == "cuda"):
                         pred = i2sb_net(x_t, t, condition)
-                        std_fwd = diffusion.get_std_fwd(t, xdim=hr_images.shape[1:])
-                        label = (x_t - hr_images) / std_fwd
+                        std_fwd = diffusion.get_std_fwd(t, xdim=val_hr_images.shape[1:])
+                        label = (x_t - val_hr_images) / std_fwd
                         loss = loss_fn(pred, label)
 
                     val_loss += loss.item() * batch_size

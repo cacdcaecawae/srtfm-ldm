@@ -1,4 +1,4 @@
-import json
+﻿import json
 import math
 import os
 import random
@@ -407,16 +407,16 @@ def train(net: nn.Module,
             net.eval()
             val_loss = 0.0
             with torch.inference_mode():
-                for lr_images, hr_images, _ in val_loader:
-                    lr_images = lr_images.to(device, non_blocking=True)
-                    hr_images = hr_images.to(device, non_blocking=True)
-                    batch_size = hr_images.size(0)
+                for val_lr_images, val_hr_images, _ in val_loader:
+                    val_lr_images = val_lr_images.to(device, non_blocking=True)
+                    val_hr_images = val_hr_images.to(device, non_blocking=True)
+                    batch_size = val_hr_images.size(0)
                     with torch.amp.autocast(device_type=device.type,
                                             dtype=amp_dtype,
                                             enabled=use_amp
                                             and device.type == "cuda"):
-                        pred = net(lr_images)
-                        loss = loss_fn(pred, hr_images)
+                        pred = net(val_lr_images)
+                        loss = loss_fn(pred, val_hr_images)
                     val_loss += loss.item() * batch_size
             avg_val_loss = val_loss / len(val_loader.dataset)
             writer.add_scalar('val/loss', avg_val_loss, epoch + 1)

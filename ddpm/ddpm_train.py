@@ -1,4 +1,4 @@
-import argparse
+﻿import argparse
 import json
 import math
 import os
@@ -485,23 +485,23 @@ def train(ddpm: DDPM,
             ddpm_net.eval()
             val_loss = 0.0
             with torch.inference_mode():
-                for lr_images, hr_images, _ in val_loader:
-                    lr_images = lr_images.to(device, non_blocking=True)
-                    hr_images = hr_images.to(device, non_blocking=True)
-                    batch_size = hr_images.size(0)
+                for val_lr_images, val_hr_images, _ in val_loader:
+                    val_lr_images = val_lr_images.to(device, non_blocking=True)
+                    val_hr_images = val_hr_images.to(device, non_blocking=True)
+                    batch_size = val_hr_images.size(0)
 
                     if two_stage:
-                        coarse_hr = unet(lr_images)
-                        condition = torch.cat([coarse_hr, lr_images], dim=1)
+                        coarse_hr = unet(val_lr_images)
+                        condition = torch.cat([coarse_hr, val_lr_images], dim=1)
                     else:
-                        condition = lr_images
+                        condition = val_lr_images
 
                     t = torch.randint(0,
                                       ddpm.n_steps,
                                       size=(batch_size, ),
                                       device=device)
-                    eps = torch.randn_like(hr_images)
-                    x_t = ddpm.sample_forward(hr_images, t, eps)
+                    eps = torch.randn_like(val_hr_images)
+                    x_t = ddpm.sample_forward(val_hr_images, t, eps)
 
                     with torch.amp.autocast(device_type=device.type,
                                             dtype=amp_dtype,
