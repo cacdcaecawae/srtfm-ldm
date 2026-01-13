@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import os
@@ -14,6 +14,7 @@ PIPELINE_SCRIPTS: Dict[Tuple[str, str], Path] = {
     ("eval", "unet"): ROOT / "unetbase" / "eval.py",
     ("train", "ddpm"): ROOT / "ddpm" / "ddpm_train.py",
     ("eval", "ddpm"): ROOT / "ddpm" / "ddpm_eval.py",
+    ("train", "ldm"): ROOT / "ddpm" / "ldm_train.py",
     ("train", "ddpm-single"): ROOT / "ddpm" / "ddpm_train.py",
     ("eval", "ddpm-single"): ROOT / "ddpm" / "ddpm_eval.py",
     ("train", "i2sb"): ROOT / "I2sb" / "i2sb_train.py",
@@ -22,11 +23,12 @@ PIPELINE_SCRIPTS: Dict[Tuple[str, str], Path] = {
     ("eval", "i2sb-single"): ROOT / "I2sb" / "i2sb_eval.py",
 }
 
-SINGLE_STAGE_PIPELINES = {"ddpm-single", "i2sb-single"}
+SINGLE_STAGE_PIPELINES = {"ddpm-single", "i2sb-single", "ldm"}
 
 EXAMPLES = """Examples:
   python runner.py train unet
   python runner.py train ddpm
+  python runner.py train ldm
   python runner.py train ddpm-single
   python runner.py train i2sb
   python runner.py train i2sb-single
@@ -49,7 +51,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "pipeline",
         type=str.lower,
-        choices=("unet", "ddpm", "ddpm-single", "i2sb", "i2sb-single"),
+        choices=("unet", "ddpm", "ldm", "ddpm-single", "i2sb", "i2sb-single"),
         help="Choose which pipeline to run.",
     )
     return parser.parse_args()
@@ -84,7 +86,10 @@ def run_script(script_path: Path, single_stage: bool) -> None:
 def main() -> None:
     args = parse_args()
     single_stage = args.pipeline in SINGLE_STAGE_PIPELINES
-    script_path = PIPELINE_SCRIPTS[(args.mode, args.pipeline)]
+    key = (args.mode, args.pipeline)
+    script_path = PIPELINE_SCRIPTS.get(key)
+    if script_path is None:
+        raise ValueError(f"Pipeline \"{args.pipeline}\" does not support mode \"{args.mode}\".")
     run_script(script_path, single_stage=single_stage)
 
 
@@ -94,7 +99,12 @@ if __name__ == "__main__":
 # Examples:
 # python runner.py train unet
 # python runner.py train ddpm
+# python runner.py train ldm
 # python runner.py train ddpm-single
 # python runner.py train i2sb
 # python runner.py train i2sb-single
 # Use 'eval' in place of 'train' to run evaluation.
+
+
+
+

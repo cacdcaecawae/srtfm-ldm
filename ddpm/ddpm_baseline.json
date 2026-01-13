@@ -1,4 +1,4 @@
-{
+﻿{
   "seed": 42,
   "device": "cuda",
   "multi_gpu": false,
@@ -27,6 +27,11 @@
     "module": "network",
     "unet_backbone": "unet_res",
     "ddpm_backbone": "unet_res_diffusion",
+    "use_vae": true,
+    "vae_path": "SR/vae_ft",
+    "vae_scale": 0.997607,
+    "latent_channels": 4,
+    "latent_downscale": 8,
     "diffusion_steps": 1000,
     "unet_checkpoint": "SR/weight_ckpt/unetonly-0105.pth",
     "checkpoint_dir": "SR/weight_ckpt",
@@ -51,3 +56,4 @@
     "num_preview_samples": 4
   }
 }
+
