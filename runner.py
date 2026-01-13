@@ -15,6 +15,7 @@ PIPELINE_SCRIPTS: Dict[Tuple[str, str], Path] = {
     ("train", "ddpm"): ROOT / "ddpm" / "ddpm_train.py",
     ("eval", "ddpm"): ROOT / "ddpm" / "ddpm_eval.py",
     ("train", "ldm"): ROOT / "ddpm" / "ldm_train.py",
+    ("eval", "ldm"): ROOT / "ddpm" / "ldm_eval.py",
     ("train", "ddpm-single"): ROOT / "ddpm" / "ddpm_train.py",
     ("eval", "ddpm-single"): ROOT / "ddpm" / "ddpm_eval.py",
     ("train", "i2sb"): ROOT / "I2sb" / "i2sb_train.py",

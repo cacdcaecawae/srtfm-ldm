@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from matplotlib import cm
 from torch.utils.data import DataLoader, random_split
 from torch.utils.tensorboard import SummaryWriter
@@ -108,13 +109,11 @@ def _maybe_repeat_channels(images: torch.Tensor) -> torch.Tensor:
 
 
 @torch.no_grad()
-def encode_latent(vae: nn.Module, images: torch.Tensor, scale: float) -> torch.Tensor:
+def encode_latent(vae: nn.Module, images: torch.Tensor, scale: float, sample: bool) -> torch.Tensor:
     images = _maybe_repeat_channels(images)
     posterior = vae.encode(images).latent_dist
-    latents = posterior.sample()
+    latents = posterior.sample() if sample else posterior.mode()
     return latents * scale
-
-
 @torch.no_grad()
 def decode_latent(vae: nn.Module, latents: torch.Tensor, scale: float) -> torch.Tensor:
     latents = latents / scale
@@ -134,15 +133,19 @@ def build_condition_latent(
     use_tfm_channels: bool,
 ) -> torch.Tensor:
     if not use_tfm_channels:
-        return encode_latent(vae, lr_images, scale)
+        return encode_latent(vae, lr_images, scale, sample=False)
     if lr_images.shape[1] < 3:
         raise ValueError("TFM channels expected, but lr_images has fewer than 3 channels.")
-    latents = []
-    for idx in range(3):
-        latents.append(encode_latent(vae, lr_images[:, idx:idx + 1], scale))
-    return torch.cat(latents, dim=1)
 
-
+    i_latent = encode_latent(vae, lr_images[:, :1], scale, sample=False)
+    xy = lr_images[:, 1:3]
+    xy_down = F.interpolate(
+        xy,
+        size=i_latent.shape[-2:],
+        mode="bilinear",
+        align_corners=True,
+    )
+    return torch.cat([i_latent, xy_down], dim=1)
 @torch.no_grad()
 def ema_update(ema_model: nn.Module, model: nn.Module, decay: float) -> None:
     ema_sd = ema_model.state_dict()
@@ -232,7 +235,11 @@ def build_ddpm(cfg: Dict[str, Any], device: torch.device) -> nn.Module:
         )
     latent_size = image_size // latent_downscale
 
-    lr_channels = latent_channels * (3 if data_cfg.get("use_tfm_channels", False) else 1)
+    use_tfm_channels = data_cfg.get("use_tfm_channels", False)
+    if use_tfm_channels:
+        lr_channels = latent_channels + 2
+    else:
+        lr_channels = latent_channels
 
     ddpm_backbone_key = model_cfg.get("ddpm_backbone", "unet_res_diffusion")
     if ddpm_backbone_key not in MODEL_CONFIGS:
@@ -248,8 +255,6 @@ def build_ddpm(cfg: Dict[str, Any], device: torch.device) -> nn.Module:
         n_steps=n_steps,
     ).to(device)
     return ddpm_net
-
-
 def select_state_dict(checkpoint: Dict[str, Any]) -> Dict[str, Any]:
     for key in (
         "ema_model_best_state_dict",
@@ -477,7 +482,7 @@ def train(ddpm: DDPM,
                 hr_images = hr_images.to(device, non_blocking=True)
                 batch_size = hr_images.size(0)
 
-                hr_latent = encode_latent(vae, hr_images, vae_scale)
+                hr_latent = encode_latent(vae, hr_images, vae_scale, sample=True)
                 condition = build_condition_latent(vae, lr_images, vae_scale, use_tfm_channels)
 
                 t = torch.randint(
@@ -523,7 +528,7 @@ def train(ddpm: DDPM,
                     hr_images = hr_images.to(device, non_blocking=True)
                     batch_size = hr_images.size(0)
 
-                    hr_latent = encode_latent(vae, hr_images, vae_scale)
+                    hr_latent = encode_latent(vae, hr_images, vae_scale, sample=True)
                     condition = build_condition_latent(vae, lr_images, vae_scale, use_tfm_channels)
 
                     t = torch.randint(
@@ -744,3 +749,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
