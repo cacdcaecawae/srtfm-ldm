@@ -509,13 +509,13 @@ unet_1_cfg = {
 
 unet_res_cfg = {
     "type": "UNet",
-    "channels": [16, 32, 64, 128, 256],
+    "channels": [32, 64, 128, 256, 512],
     "residual": True,
 }
 
 unet_res_diffusion_cfg = {
     'type': 'UNetDiffusion',
-    'channels': [16, 32, 64, 128, 256],
+    'channels': [32, 64, 128, 256, 512],
     'pe_dim': 128,
     'residual': True,
 }

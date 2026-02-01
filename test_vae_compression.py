@@ -5,7 +5,7 @@ from diffusers.models import AutoencoderKL
 from pathlib import Path
 from PIL import Image
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu"); vae_path = "./SR/vae_ft"; h5_path = "./data/output_merge/train.h5"; out_dir = Path("./vae_compression_vis")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu"); vae_path = "./SR/vae_ft"; h5_path = "./data/output_merge/eval_augmented.h5"; out_dir = Path("./vae_compression_vis")
 transpose_hr = True; transpose_lr = True
 scale_probe_samples = 1500
 
@@ -57,7 +57,7 @@ def make_tensor_1ch(arr2d):
     return x
 
 with h5py.File(h5_path, "r") as f:
-    name = sorted(f["hr"].keys())[120]; hr_node = f["hr"][name]
+    name = sorted(f["hr"].keys())[1]; hr_node = f["hr"][name]
     hr = hr_node[:] if isinstance(hr_node, h5py.Dataset) else (hr_node["data"][:] if "data" in hr_node else hr_node[list(hr_node.keys())[0]][:])
     if transpose_hr: hr = hr.T
     tfm = f["TFM"][name]
@@ -79,23 +79,23 @@ print("TFM I", intensity.shape, "latent", tuple(i_z.shape), "min/max", f"{i_min:
 print("TFM X", x_coord.shape, "latent", tuple(x_z.shape), "min/max", f"{x_min:.6g}", f"{x_max:.6g}", "mse_raw", f"{x_mse_raw:.6g}", "mse_norm", f"{x_mse_norm:.6g}", "kl", f"{x_kl:.6g}", "kl_elem", f"{x_kl_elem:.6g}", "z_mean", f"{x_z_mean:.6g}", "z_std", f"{x_z_std:.6g}")
 print("TFM Y", y_coord.shape, "latent", tuple(y_z.shape), "min/max", f"{y_min:.6g}", f"{y_max:.6g}", "mse_raw", f"{y_mse_raw:.6g}", "mse_norm", f"{y_mse_norm:.6g}", "kl", f"{y_kl:.6g}", "kl_elem", f"{y_kl_elem:.6g}", "z_mean", f"{y_z_mean:.6g}", "z_std", f"{y_z_std:.6g}")
 
-with torch.no_grad():
-    with h5py.File(h5_path, "r") as f:
-        names = sorted(f["hr"].keys())
-        count = min(scale_probe_samples, len(names))
-        zs = []
-        for idx in range(count):
-            name_i = names[idx]
-            hr_node = f["hr"][name_i]
-            hr_arr = hr_node[:] if isinstance(hr_node, h5py.Dataset) else (hr_node["data"][:] if "data" in hr_node else hr_node[list(hr_node.keys())[0]][:])
-            if transpose_hr: hr_arr = hr_arr.T
-            x = make_tensor_1ch(hr_arr).unsqueeze(0).to(device)
-            z = vae.encode(x).latent_dist.sample()
-            zs.append(z.cpu())
-        z_all = torch.cat(zs, dim=0)
-        z_std = z_all.std().item()
-        scale_reco = 1.0 / z_std if z_std > 0 else 1.0
+# with torch.no_grad():
+#     with h5py.File(h5_path, "r") as f:
+#         names = sorted(f["hr"].keys())
+#         count = min(scale_probe_samples, len(names))
+#         zs = []
+#         for idx in range(count):
+#             name_i = names[idx]
+#             hr_node = f["hr"][name_i]
+#             hr_arr = hr_node[:] if isinstance(hr_node, h5py.Dataset) else (hr_node["data"][:] if "data" in hr_node else hr_node[list(hr_node.keys())[0]][:])
+#             if transpose_hr: hr_arr = hr_arr.T
+#             x = make_tensor_1ch(hr_arr).unsqueeze(0).to(device)
+#             z = vae.encode(x).latent_dist.sample()
+#             zs.append(z.cpu())
+#         z_all = torch.cat(zs, dim=0)
+#         z_std = z_all.std().item()
+#         scale_reco = 1.0 / z_std if z_std > 0 else 1.0
 
-print("scale_probe_samples:", scale_probe_samples)
-print("z_std(sample):", f"{z_std:.6g}", "recommended_scale:", f"{scale_reco:.6g}")
+# print("scale_probe_samples:", scale_probe_samples)
+# print("z_std(sample):", f"{z_std:.6g}", "recommended_scale:", f"{scale_reco:.6g}")
 print("saved:", str(out_dir))

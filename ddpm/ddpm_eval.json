@@ -1,11 +1,11 @@
 {
   "device": "cuda",
   "data": {
-    "batch_size": 1,
+    "batch_size": 6,
     "num_workers": 4,
     "image_size": 400,
     "channels": 1,
-    "h5_path": "./data/output_merge/eval.h5",
+    "h5_path": "./data/output_merge/eval_augmented.h5",
     "h5_lr_key": "TFM",
     "h5_hr_key": "hr",
     "h5_lr_dataset": "intensity",
@@ -21,18 +21,19 @@
     "ddpm_backbone": "unet_res_diffusion",
     "diffusion_steps": 1000,
     "unet_checkpoint": "SR/weight_ckpt/unetonly-0107.pth",
-    "ddpm_checkpoint": "SR/weight_ckpt/ddpm_tfm_refine_base.pth"
+    "ddpm_checkpoint": "SR/weight_ckpt/ddpm_0114-3-z.pth"
   },
   "sampler": {
-    "threshold": 0.95,
+    "threshold": 0.9,
     "type": "ddim",
     "ddim_steps": 100,
     "eta": 1.0,
-    "seed": 1234,
-    "simple_var": false
+    "seed": 123,
+    "simple_var": false,
+    "n_samples": 10
   },
   "output": {
-    "root": "SR/eval_results_ddpm",
+    "root": "SR/eval_results_ddpm_0114-3-z-augmented-10",
     "save_images": true
   }
 }

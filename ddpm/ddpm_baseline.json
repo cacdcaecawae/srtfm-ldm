@@ -47,7 +47,12 @@
     "lr_min": 1e-6,
     "lr_max": 5e-4,
     "amp": true,
-    "amp_dtype": "bfloat16"
+    "amp_dtype": "bfloat16",
+    "loss_weight": {
+      "defect_weight": 5.0,
+      "background_weight": 1.0,
+      "use_x_start": true
+    }
   },
   "logging": {
     "tensorboard_root": "runs",

@@ -11,6 +11,7 @@ from typing import Any, Dict, Optional, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from matplotlib import cm
 from PIL import Image
 from torch.utils.data import DataLoader, random_split
@@ -23,6 +24,72 @@ from ddpm.ddpm_simple import DDPM
 from network.network import (build_network, convnet_big_cfg, convnet_medium_cfg,
                      convnet_small_cfg, unet_1_cfg, unet_res_cfg,
                      unet_res_diffusion_cfg)
+
+
+class WeightedMSELoss(nn.Module):
+    """针对 Mask 区域的加权 MSE Loss
+    
+    在扩散模型训练中，对 GT (x_start/hr_images) 中的缺陷区域赋予更高权重，
+    使模型更关注 mask=1 的地方。
+    
+    工作原理：
+    1. 计算逐像素 MSE: (eps_pred - eps)²
+    2. 从 x_start (Mask GT) 提取缺陷区域（假设原始 mask 是 0/1 二值图）
+       - 原始值: background=0, defect=1
+       - 归一化后 [-1,1]: background=-1, defect=+1
+       - 因此用 x_start > 0 可以正确分离出缺陷区域
+    3. 对缺陷区域的 loss 乘以 defect_weight，背景区域乘以 background_weight
+    4. 返回加权平均 loss
+    
+    Args:
+        defect_weight: 缺陷区域权重（mask=1 的地方），建议范围 2-20
+        background_weight: 背景区域权重（mask=0 的地方），通常为 1.0
+        use_x_start: 是否从 x_start (hr_images) 创建权重图。
+                     如果 False，则从预测目标 (eps/x0) 创建权重图
+    """
+    def __init__(self, 
+                 defect_weight: float = 5.0, 
+                 background_weight: float = 1.0,
+                 use_x_start: bool = True):
+        super().__init__()
+        self.defect_weight = defect_weight
+        self.background_weight = background_weight
+        self.use_x_start = use_x_start
+    
+    def forward(self, 
+                pred: torch.Tensor, 
+                target: torch.Tensor,
+                x_start: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """计算加权 MSE loss
+        
+        Args:
+            pred: 预测值 [B, C, H, W]，通常是预测的噪声 eps_pred
+            target: 目标值 [B, C, H, W]，通常是真实噪声 eps
+            x_start: 原始 GT 图像 [B, C, H, W]，归一化到 [-1,1]
+                     对于二值 mask: 背景=-1, 缺陷=+1
+        
+        Returns:
+            加权后的标量 loss
+        """
+        # 计算逐像素 MSE
+        mse = F.mse_loss(pred, target, reduction='none')  # [B, C, H, W]
+        
+        # 从 x_start (Mask GT) 创建权重图
+        # 注意：数据集归一化后，二值 mask 的值为 {-1, +1}
+        # 因此 x_start > 0 会选中缺陷区域（原始值=1）
+        if self.use_x_start and x_start is not None:
+            mask_binary = (x_start > 0).float()  # [B, C, H, W]
+        else:
+            # 降级方案：如果没有 x_start，使用幅值阈值（不推荐）
+            mask_binary = (target.abs() > target.abs().mean()).float()
+        
+        # 创建权重图：缺陷处权重为 defect_weight，背景为 background_weight
+        weight_map = (mask_binary * self.defect_weight + 
+                     (1 - mask_binary) * self.background_weight)
+        
+        # 加权并求均值
+        weighted_loss = (mse * weight_map).mean()
+        return weighted_loss
 
 
 MODEL_CONFIGS: Dict[str, Dict[str, Any]] = {
@@ -389,7 +456,21 @@ def train(ddpm: DDPM,
     ddpm_net = ddpm_net.to(device).train()
     ema_net = deepcopy(ddpm_net).eval().requires_grad_(False)
 
-    loss_fn = nn.MSELoss()
+    # 支持加权 Loss：对缺陷区域（mask=1）赋予更高权重
+    loss_weight_cfg = opt_cfg.get("loss_weight", {})
+    if loss_weight_cfg:
+        defect_weight = loss_weight_cfg.get("defect_weight", 5.0)
+        background_weight = loss_weight_cfg.get("background_weight", 1.0)
+        use_x_start = loss_weight_cfg.get("use_x_start", True)
+        loss_fn = WeightedMSELoss(defect_weight=defect_weight,
+                                  background_weight=background_weight,
+                                  use_x_start=use_x_start)
+        log.info(f"Using WeightedMSELoss: defect_weight={defect_weight}, "
+                 f"background_weight={background_weight}, use_x_start={use_x_start}")
+    else:
+        loss_fn = nn.MSELoss()
+        log.info("Using standard MSELoss")
+    
     optimizer = torch.optim.AdamW(
         ddpm_net.parameters(),
         lr=opt_cfg["learning_rate"],
@@ -457,7 +538,11 @@ def train(ddpm: DDPM,
                                         enabled=use_amp
                                         and device.type == "cuda"):
                     eps_pred = ddpm_net(x_t, t, condition)
-                    loss = loss_fn(eps_pred, eps)
+                    # 如果使用 WeightedMSELoss，传入 x_start (hr_images) 用于权重图生成
+                    if isinstance(loss_fn, WeightedMSELoss):
+                        loss = loss_fn(eps_pred, eps, x_start=hr_images)
+                    else:
+                        loss = loss_fn(eps_pred, eps)
 
                 optimizer.zero_grad(set_to_none=True)
                 if use_amp and device.type == "cuda":
@@ -508,7 +593,11 @@ def train(ddpm: DDPM,
                                             enabled=use_amp
                                             and device.type == "cuda"):
                         eps_pred = ddpm_net(x_t, t, condition)
-                        loss = loss_fn(eps_pred, eps)
+                        # 如果使用 WeightedMSELoss，传入 x_start (val_hr_images) 用于权重图生成
+                        if isinstance(loss_fn, WeightedMSELoss):
+                            loss = loss_fn(eps_pred, eps, x_start=val_hr_images)
+                        else:
+                            loss = loss_fn(eps_pred, eps)
 
                     val_loss += loss.item() * batch_size
             avg_val_loss = val_loss / len(val_loader.dataset)

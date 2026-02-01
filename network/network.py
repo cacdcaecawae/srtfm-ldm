@@ -470,7 +470,7 @@ unet_1_cfg = {
 
 unet_res_cfg = {
     "type": "UNet",
-    "channels": [16, 32, 64, 128, 256],
+    "channels": [32,64,128,256,512],#,[16, 32, 64, 128, 256]
     "residual": True,
 }
 

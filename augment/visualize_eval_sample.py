@@ -4,8 +4,8 @@
 可视化评估数据集中的指定样本
 
 用法:
-    python augement/visualize_eval_sample.py --sample 901_1
-    python augement/visualize_eval_sample.py --sample 901_1 --h5 data/output_merge/eval_augmented.h5
+    python augment/visualize_eval_sample.py --sample 901_1
+    python augment/visualize_eval_sample.py --sample 933_1 --h5 data/output_merge/eval_augmented.h5
 """
 
 import argparse
@@ -137,7 +137,7 @@ def visualize_sample(h5_path: str, sample_name: str, lr_key: str = "TFM",
         plt.tight_layout()
         
         # 保存
-        output_path = Path(f"./augement/visualize_{sample_name}.png")
+        output_path = Path(f"./augment/visualize_{sample_name}.png")
         plt.savefig(output_path, dpi=150, bbox_inches='tight')
         print(f"\n✓ 可视化已保存至: {output_path}")
         

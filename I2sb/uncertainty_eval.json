@@ -2,7 +2,7 @@
   "device": "cuda",
   "data": {
     "batch_size": 4,
-    "num_workers": 4,
+    "num_workers": 0,
     "image_size": 400,
     "channels": 1,
     "h5_path": "./data/output_merge/eval_augmented.h5",
@@ -28,21 +28,19 @@
     "diffusion_steps": 1000,
     "checkpoint_path": "SR/weight_ckpt/i2sb_tfm_refine_base.pth"
   },
-  "vae": {
-    "enabled": false,
-    "checkpoint_path": "./SR/autodl_weight/vae_best-1.pt",
-    "encoder_key": "enc",
-    "decoder_key": "dec"
-  },
   "sampler": {
     "threshold": 0.9,
     "num_steps": 100,
     "ot_ode": false,
-    "seed": 1234,
-    "n_samples": 5
+    "seed": 1234
+  },
+  "uncertainty": {
+    "n_samples": 5,
+    "low_threshold": 0.05,
+    "high_threshold": 0.15
   },
   "output": {
-    "root": "SR/eval_results_i2sb_tfm_refine_base_0113-1-augmented0131",
+    "root": "SR/eval_results_i2sb_uncertainty_0132",
     "save_images": true
   }
 }

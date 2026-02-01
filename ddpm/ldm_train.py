@@ -37,7 +37,7 @@ DEFAULT_CONFIG_PATH = Path(__file__).with_name("ddpm_baseline.json")
 
 
 def load_config(path: Path) -> Dict[str, Any]:
-    with path.open("r", encoding="utf-8") as handle:
+    with path.open("r", encoding="utf-8-sig") as handle:
         return json.load(handle)
 
 
@@ -94,6 +94,7 @@ def load_vae(model_cfg: Dict[str, Any], device: torch.device) -> Tuple[nn.Module
 
     vae = AutoencoderKL.from_pretrained(vae_path)
     vae.to(device)
+    vae.half()
     vae.eval()
     for param in vae.parameters():
         param.requires_grad = False
@@ -111,13 +112,15 @@ def _maybe_repeat_channels(images: torch.Tensor) -> torch.Tensor:
 @torch.no_grad()
 def encode_latent(vae: nn.Module, images: torch.Tensor, scale: float, sample: bool) -> torch.Tensor:
     images = _maybe_repeat_channels(images)
-    posterior = vae.encode(images).latent_dist
-    latents = posterior.sample() if sample else posterior.mode()
+    with torch.amp.autocast('cuda'):
+        posterior = vae.encode(images).latent_dist
+        latents = posterior.sample() if sample else posterior.mode()
     return latents * scale
 @torch.no_grad()
 def decode_latent(vae: nn.Module, latents: torch.Tensor, scale: float) -> torch.Tensor:
     latents = latents / scale
-    decoded = vae.decode(latents)
+    with torch.amp.autocast('cuda'):
+        decoded = vae.decode(latents)
     if hasattr(decoded, "sample"):
         decoded = decoded.sample
     if decoded.shape[1] > 1:

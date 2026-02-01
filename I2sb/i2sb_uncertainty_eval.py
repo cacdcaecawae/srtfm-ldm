@@ -1,3 +1,17 @@
+"""
+I2SB 不确定性量化评估脚本
+
+对每个测试样本进行多次独立采样（默认5次），计算像素级不确定性 U_pixel，
+并根据不确定性水平分组统计性能指标。
+
+像素级不确定性定义：
+    U_pixel = (1 / HW) * Σ_x Σ_y Var({M^(k)_{y,x}}_{k=1}^K)
+
+分组标准：
+    - 高置信度组：U_pixel < 0.05
+    - 低置信度组：U_pixel > 0.15
+"""
+
 import argparse
 import csv
 import json
@@ -39,7 +53,7 @@ MODEL_CONFIGS: Dict[str, Dict[str, Any]] = {
     "unet_res_diffusion": unet_res_diffusion_cfg,
 }
 
-DEFAULT_CONFIG_PATH = Path(__file__).with_name("eval.json")
+DEFAULT_CONFIG_PATH = Path(__file__).with_name("uncertainty_eval.json")
 
 
 def load_config(path: Path) -> Dict[str, Any]:
@@ -206,27 +220,31 @@ def denormalize(tensor: torch.Tensor) -> torch.Tensor:
     return tensor.clamp(-1, 1).add(1).div(2)
 
 
-def compute_iou(pred: torch.Tensor, target: torch.Tensor, threshold: float = 0.5) -> float:
+def compute_pixel_uncertainty(samples: torch.Tensor) -> float:
     """
-    计算IoU (Intersection over Union)
+    计算像素级不确定性 U_pixel
     
     Args:
-        pred: 预测张量 [C, H, W] 或 [B, C, H, W]，值域 [0, 1]
-        target: 目标张量，形状与pred相同
-        threshold: 二值化阈值
+        samples: [K, C, H, W] 张量，K次采样结果
     
     Returns:
-        IoU值
+        U_pixel: 像素级不确定性（方差的全图平均）
     """
-    # 二值化
+    # 计算每个像素在K次采样中的方差
+    pixel_variance = torch.var(samples, dim=0, unbiased=False)  # [C, H, W]
+    # 对所有像素取平均
+    u_pixel = pixel_variance.mean().item()
+    return u_pixel
+
+
+def compute_iou(pred: torch.Tensor, target: torch.Tensor, threshold: float = 0.5) -> float:
+    """计算IoU (Intersection over Union)"""
     pred_binary = (pred > threshold).float()
     target_binary = (target > threshold).float()
     
-    # 计算交集和并集
     intersection = (pred_binary * target_binary).sum()
     union = pred_binary.sum() + target_binary.sum() - intersection
     
-    # 避免除零
     if union == 0:
         return 1.0 if intersection == 0 else 0.0
     
@@ -235,29 +253,14 @@ def compute_iou(pred: torch.Tensor, target: torch.Tensor, threshold: float = 0.5
 
 
 def compute_dice(pred: torch.Tensor, target: torch.Tensor, threshold: float = 0.5) -> float:
-    """
-    计算Dice系数 (Dice Coefficient)
-    
-    Args:
-        pred: 预测张量 [C, H, W] 或 [B, C, H, W]，值域 [0, 1]
-        target: 目标张量，形状与pred相同
-        threshold: 二值化阈值
-    
-    Returns:
-        Dice系数值
-    """
-    # 二值化
+    """计算Dice系数"""
     pred_binary = (pred > threshold).float()
     target_binary = (target > threshold).float()
     
-    # 计算交集
     intersection = (pred_binary * target_binary).sum()
-    
-    # 计算Dice系数: 2 * |X ∩ Y| / (|X| + |Y|)
     pred_sum = pred_binary.sum()
     target_sum = target_binary.sum()
     
-    # 避免除零
     if pred_sum + target_sum == 0:
         return 1.0 if intersection == 0 else 0.0
     
@@ -266,65 +269,38 @@ def compute_dice(pred: torch.Tensor, target: torch.Tensor, threshold: float = 0.
 
 
 def compute_hd95(pred: torch.Tensor, target: torch.Tensor, threshold: float = 0.5, percentile: float = 95.0) -> float:
-    """
-    计算95th percentile Hausdorff Distance (HD95)
-    
-    Args:
-        pred: 预测张量 [C, H, W] 或 [B, C, H, W]，值域 [0, 1]
-        target: 目标张量，形状与pred相同
-        threshold: 二值化阈值
-        percentile: 百分位数，默认95
-    
-    Returns:
-        HD95值（单位：像素）
-    """
+    """计算95th percentile Hausdorff Distance"""
     from scipy.ndimage import binary_erosion
     
-    # 1. 转为 Numpy 并二值化
     pred_np = (pred > threshold).cpu().numpy().astype(bool)
     target_np = (target > threshold).cpu().numpy().astype(bool)
 
-    # 2. 维度压缩：确保处理的是 [H, W] 的 2D 图像
-    # 如果是 [B, C, H, W] 或 [C, H, W]，且我们只关心"是否有缺陷"，则压缩维度
     while pred_np.ndim > 2:
         pred_np = pred_np.any(axis=0)
     while target_np.ndim > 2:
         target_np = target_np.any(axis=0)
     
-    # 3. 空值检查
-    # 如果两张图都是黑的（都没预测出缺陷，GT也没缺陷），距离为0（完美匹配）
     if not pred_np.any() and not target_np.any():
         return 0.0
     
-    # 如果一张有一张没有，返回最大惩罚（对角线距离）
     if not pred_np.any() or not target_np.any():
         h, w = pred_np.shape
         return float(np.sqrt(h**2 + w**2))
 
-    # 4. 计算距离变换
-    # distance_transform_edt 计算的是到最近零点的距离
-    # 输入 ~pred_np 使得前景点到最近背景点的距离场
     pred_dt = distance_transform_edt(~pred_np) 
     target_dt = distance_transform_edt(~target_np)
 
-    # 5. 提取边界（使用形态学腐蚀 + XOR）
-    # 边界 = 原图 XOR 腐蚀后的图
     pred_border = pred_np ^ binary_erosion(pred_np, border_value=0)
     target_border = target_np ^ binary_erosion(target_np, border_value=0)
     
-    # 如果边界提取后为空（例如全图都是前景），退化处理
     if not pred_border.any(): 
         pred_border = pred_np
     if not target_border.any(): 
         target_border = target_np
 
-    # 6. 计算距离：
-    # Pred 边界上的点，到 Target 最近前景点的距离
     d_pred_to_target = target_dt[pred_border]
-    # Target 边界上的点，到 Pred 最近前景点的距离
     d_target_to_pred = pred_dt[target_border]
     
-    # 合并所有距离
     all_distances = np.concatenate([d_pred_to_target, d_target_to_pred])
     
     if len(all_distances) == 0:
@@ -333,8 +309,7 @@ def compute_hd95(pred: torch.Tensor, target: torch.Tensor, threshold: float = 0.
     return float(np.percentile(all_distances, percentile))
 
 
-def tensor_to_image(tensor: torch.Tensor,
-                    apply_jet: bool = False) -> Image.Image:
+def tensor_to_image(tensor: torch.Tensor, apply_jet: bool = False) -> Image.Image:
     """将张量转换为 PIL Image"""
     array = tensor.permute(1, 2, 0).cpu().numpy()
     array = np.clip(array, 0.0, 1.0)
@@ -358,59 +333,42 @@ def overlay_contour(pred_tensor: torch.Tensor,
                     apply_jet: bool = False,
                     threshold: float = 0.5,
                     contour_color: tuple = (0, 255, 0)) -> Image.Image:
-    """在预测图像上叠加GT轮廓
-    
-    Args:
-        pred_tensor: 预测张量 [C, H, W]，值域 [0, 1]
-        gt_tensor: GT张量 [C, H, W]，值域 [0, 1]
-        apply_jet: 是否应用jet伪彩色
-        threshold: 二值化阈值
-        contour_color: 轮廓颜色 (R, G, B)，默认绿色
-    
-    Returns:
-        叠加轮廓后的PIL Image
-    """
-    # 转换预测图像
+    """在预测图像上叠加GT轮廓"""
     pred_array = pred_tensor.permute(1, 2, 0).cpu().numpy()
     pred_array = np.clip(pred_array, 0.0, 1.0)
     
-    # 转换GT为二值掩码
     gt_array = gt_tensor.cpu().numpy()
-    if gt_array.ndim == 3:  # [C, H, W]
-        gt_array = gt_array.max(axis=0)  # 取最大值投影
+    if gt_array.ndim == 3:
+        gt_array = gt_array.max(axis=0)
     gt_binary = (gt_array > threshold).astype(np.uint8) * 255
     
-    # 找到轮廓
     contours, _ = cv2.findContours(gt_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
-    # 如果是灰度图或jet伪彩色，先转为RGB
     if apply_jet:
         if pred_array.shape[2] == 1:
             gray_np = pred_array[:, :, 0]
         else:
             gray_np = pred_array.mean(axis=2)
         gray_uint8 = (gray_np * 255.0).astype(np.uint8)
-        # 应用jet色图
         img_rgb = cv2.applyColorMap(gray_uint8, cv2.COLORMAP_JET)
         img_rgb = cv2.cvtColor(img_rgb, cv2.COLOR_BGR2RGB)
     else:
         pred_uint8 = (pred_array * 255.0).astype(np.uint8)
         if pred_uint8.shape[2] == 1:
-            # 灰度图转RGB
             img_rgb = cv2.cvtColor(pred_uint8, cv2.COLOR_GRAY2RGB)
         else:
             img_rgb = pred_uint8
     
-    # 绘制轮廓
     cv2.drawContours(img_rgb, contours, -1, contour_color, thickness=1)
     
     return Image.fromarray(img_rgb)
 
 
-def evaluate(cfg: Dict[str, Any], device: torch.device, two_stage: bool = True) -> None:
-    """执行 I2SB 评估"""
+def evaluate_with_uncertainty(cfg: Dict[str, Any], device: torch.device, two_stage: bool = True) -> None:
+    """执行不确定性量化评估"""
     data_cfg = cfg["data"]
     sampler_cfg = cfg.get("sampler", {})
+    uncertainty_cfg = cfg.get("uncertainty", {})
     
     dataloader = create_dataloader(data_cfg)
     unet, net = build_models(cfg, device, two_stage=two_stage)
@@ -421,35 +379,50 @@ def evaluate(cfg: Dict[str, Any], device: torch.device, two_stage: bool = True) 
     output_root = Path(cfg["output"]["root"])
     images_dir = output_root / "images"
     variance_dir = output_root / "variance"
+    uncertainty_dir = output_root / "uncertainty_maps"
     ensure_dir(images_dir)
     ensure_dir(variance_dir)
+    ensure_dir(uncertainty_dir)
     ensure_dir(output_root)
+    
+    # 不确定性量化参数
+    n_samples = uncertainty_cfg.get("n_samples", 5)  # 每个样本采样5次
+    low_threshold = uncertainty_cfg.get("low_threshold", 0.05)  # 高置信度阈值
+    high_threshold = uncertainty_cfg.get("high_threshold", 0.15)  # 低置信度阈值
     
     # I2SB 采样参数
     num_steps = sampler_cfg.get("num_steps", 100)
     ot_ode = sampler_cfg.get("ot_ode", False)
-    n_samples = int(sampler_cfg.get("n_samples", 1))  # 多次采样取平均
     n_diffusion_steps = cfg["model"]["diffusion_steps"]
+    threshold = sampler_cfg.get("threshold", 0.05)
     
-    # 生成时间步序列 [0, step_size, ..., n_diffusion_steps-1]
-    # 注意：步数范围是 0 到 n_diffusion_steps-1，因为嵌入层索引从 0 开始
+    # 生成时间步序列
     step_size = n_diffusion_steps // num_steps
     steps = np.arange(0, n_diffusion_steps, step_size)
     if steps[-1] != n_diffusion_steps - 1:
         steps = np.append(steps, n_diffusion_steps - 1)
     
-    print(f"I2SB Sampling: {num_steps} steps, OT-ODE={ot_ode}")
+    print(f"不确定性量化评估配置：")
+    print(f"  - 每样本采样次数：{n_samples}")
+    print(f"  - 高置信度阈值：U_pixel < {low_threshold}")
+    print(f"  - 低置信度阈值：U_pixel > {high_threshold}")
+    print(f"  - I2SB采样步数：{num_steps}, OT-ODE={ot_ode}")
+    print(f"  - 批次大小：{data_cfg['batch_size']}, 最多测试：{120}个样本")
+    print(f"  - 批量并行：每批处理 {data_cfg['batch_size']} × {n_samples} = {data_cfg['batch_size'] * n_samples} 个推理")
     
-    psnr_scores = []
-    ssim_scores = []
-    iou_scores = []
-    dice_scores = []
-    hd95_scores = []
-    per_image_results = []
+    # 存储所有样本的结果
+    all_results = []
+    max_samples = 180  # 只测试180个样本
+    sample_count = 0
+    
+    # 计算预期的batch数量
+    batch_size = data_cfg['batch_size']
+    expected_batches = (max_samples + batch_size - 1) // batch_size
     
     with torch.inference_mode():
-        for lr_images, hr_images, names in tqdm(dataloader, desc="Evaluating"):
-            # 固定随机种子以保证可重复性
+        pbar = tqdm(total=max_samples, desc="不确定性评估", unit="样本")
+        for lr_images, hr_images, names in dataloader:
+            # 设置随机种子（用于可重复性）
             seed = sampler_cfg.get("seed", 1234)
             torch.manual_seed(seed)
             if torch.cuda.is_available():
@@ -457,71 +430,74 @@ def evaluate(cfg: Dict[str, Any], device: torch.device, two_stage: bool = True) 
             
             lr_images = lr_images.to(device)
             hr_images = hr_images.to(device)
+            batch_size = lr_images.shape[0]
             
+            # 准备condition（two-stage或single-stage）
             if two_stage:
                 coarse_hr = unet(lr_images[:, :1])
                 condition = torch.cat([coarse_hr, lr_images], dim=1)
             else:
                 condition = lr_images
-
-            # 多次采样取平均（批量并行）
-            batch_size = lr_images.shape[0]
-            condition_expanded = condition.repeat(n_samples, 1, 1, 1)  # [B*n_samples, C, H, W]
             
-            # I2SB 采样：一次性处理所有样本
-            sr_images_all = diffusion.ddpm_sampling(
+            # 🚀 批量并行处理：[B, C, H, W] -> [B*K, C, H, W]
+            # 将batch中的每个样本复制K次，一次性处理所有
+            condition_expanded = condition.repeat(n_samples, 1, 1, 1)  # [B*K, C, H, W]
+            
+            # I2SB 批量采样：一次性处理所有样本的所有采样
+            sr_samples_all = diffusion.ddpm_sampling(
                 steps=steps,
                 net=net,
                 x1=condition_expanded,
                 ot_ode=ot_ode,
                 verbose=False
+            )  # [B*K, C, H, W]
+            
+            # 反归一化和阈值处理
+            sr_samples_all = denormalize(sr_samples_all)
+            sr_samples_all = torch.where(
+                sr_samples_all < threshold,
+                torch.zeros_like(sr_samples_all),
+                sr_samples_all
             )
             
-            # 重塑并计算平均和方差（n_samples=1时var为0）
-            sr_images_reshaped = sr_images_all.view(n_samples, batch_size, *sr_images_all.shape[1:])
-            sr_images = sr_images_reshaped.mean(dim=0)
-            sr_variance = sr_images_reshaped.var(dim=0) if n_samples > 1 else torch.zeros_like(sr_images)
+            # 重塑为 [K, B, C, H, W] 以便按样本分组
+            sr_samples_reshaped = sr_samples_all.view(n_samples, batch_size, *sr_samples_all.shape[1:])
             
-            # 反归一化
-            sr_for_metric = denormalize(sr_images)
-            
-            # 阈值处理
-            threshold = sampler_cfg.get("threshold", 0.05)
-            sr_for_metric = torch.where(
-                sr_for_metric < threshold,
-                torch.zeros_like(sr_for_metric),
-                sr_for_metric
-            )
-            
-            # 压缩到 [0, 227/253]
-            sr_for_image = sr_for_metric #* (227.0 / 253.0)
-            
-            hr_for_metric = denormalize(hr_images)
-            
-            # 计算指标
-            for idx, name in enumerate(names):
-                pred = sr_for_metric[idx].unsqueeze(0)
-                target = hr_for_metric[idx].unsqueeze(0)
+            # 对batch中的每个样本单独处理
+            for idx_in_batch in range(batch_size):
+                name = names[idx_in_batch]
+                hr_single = hr_images[idx_in_batch:idx_in_batch+1]
                 
-                psnr = peak_signal_noise_ratio(pred, target, data_range=1.0)
-                ssim = structural_similarity_index_measure(pred, target, data_range=1.0)
-                iou = compute_iou(pred, target, threshold=threshold)
-                dice = compute_dice(pred, target, threshold=threshold)
-                hd95 = compute_hd95(pred, target, threshold=threshold)
+                # 提取该样本的所有采样结果：[K, C, H, W]
+                samples = sr_samples_reshaped[:, idx_in_batch, :, :, :]
                 
-                psnr_scores.append(psnr.item())
-                ssim_scores.append(ssim.item())
-                iou_scores.append(iou)
-                dice_scores.append(dice)
-                hd95_scores.append(hd95)
-                per_image_results.append({
+                # 计算像素级不确定性
+                u_pixel = compute_pixel_uncertainty(samples)
+                
+                # 计算平均预测
+                sr_mean = samples.mean(dim=0, keepdim=True)  # [1, C, H, W]
+                sr_variance = samples.var(dim=0, keepdim=True)  # [1, C, H, W]
+                
+                # 计算性能指标
+                hr_denorm = denormalize(hr_single)
+                
+                psnr = peak_signal_noise_ratio(sr_mean, hr_denorm, data_range=1.0)
+                ssim = structural_similarity_index_measure(sr_mean, hr_denorm, data_range=1.0)
+                iou = compute_iou(sr_mean, hr_denorm, threshold=threshold)
+                dice = compute_dice(sr_mean, hr_denorm, threshold=threshold)
+                hd95 = compute_hd95(sr_mean, hr_denorm, threshold=threshold)
+                
+                # 保存结果
+                result = {
                     "filename": name,
+                    "u_pixel": u_pixel,
                     "psnr": psnr.item(),
                     "ssim": ssim.item(),
                     "iou": iou,
                     "dice": dice,
                     "hd95": hd95,
-                })
+                }
+                all_results.append(result)
                 
                 # 保存图像
                 if cfg["output"].get("save_images", True):
@@ -530,85 +506,168 @@ def evaluate(cfg: Dict[str, Any], device: torch.device, two_stage: bool = True) 
                     else:
                         image_filename = name
                     
-                    # 保存带轮廓的对比图
-                    overlay_contour(sr_for_image[idx],
-                                    hr_for_metric[idx],
+                    # 保存平均预测（带GT轮廓）
+                    overlay_contour(sr_mean[0],
+                                    hr_denorm[0],
                                     apply_jet=use_jet,
                                     threshold=threshold).save(images_dir / image_filename)
                     
-                    # 保存方差图（如果n_samples > 1）
-                    if n_samples > 1:
-                        var_normalized = sr_variance[idx]
-                        # 归一化方差到[0,1]范围以便可视化
-                        var_min = var_normalized.min()
-                        var_max = var_normalized.max()
-                        if var_max > var_min:
-                            var_normalized = (var_normalized - var_min) / (var_max - var_min)
-                        else:
-                            var_normalized = torch.zeros_like(var_normalized)
-                        # 保存方差图，使用jet色图以便更好地可视化
-                        tensor_to_image(var_normalized, apply_jet=True).save(variance_dir / image_filename)
+                    # 保存方差图
+                    var_normalized = sr_variance[0]
+                    var_min = var_normalized.min()
+                    var_max = var_normalized.max()
+                    if var_max > var_min:
+                        var_normalized = (var_normalized - var_min) / (var_max - var_min)
+                    else:
+                        var_normalized = torch.zeros_like(var_normalized)
+                    tensor_to_image(var_normalized, apply_jet=True).save(variance_dir / image_filename)
+                    
+                    # 保存不确定性图（与方差图相同，但标注U_pixel值）
+                    uncertainty_img = tensor_to_image(var_normalized, apply_jet=True)
+                    uncertainty_img.save(uncertainty_dir / image_filename)
+                
+                # 更新样本计数和进度条
+                sample_count += 1
+                pbar.update(1)
+            
+            # 达到120个样本后停止
+            if sample_count >= max_samples:
+                break
+        
+        pbar.close()
     
-    # 计算统计指标（平均、最大、最小）
-    avg_psnr = float(np.mean(psnr_scores)) if psnr_scores else 0.0
-    max_psnr = float(np.max(psnr_scores)) if psnr_scores else 0.0
-    min_psnr = float(np.min(psnr_scores)) if psnr_scores else 0.0
+    # ========== 分组统计 ==========
+    high_confidence = [r for r in all_results if r["u_pixel"] < low_threshold]
+    low_confidence = [r for r in all_results if r["u_pixel"] > high_threshold]
+    middle_confidence = [r for r in all_results if low_threshold <= r["u_pixel"] <= high_threshold]
     
-    avg_ssim = float(np.mean(ssim_scores)) if ssim_scores else 0.0
-    max_ssim = float(np.max(ssim_scores)) if ssim_scores else 0.0
-    min_ssim = float(np.min(ssim_scores)) if ssim_scores else 0.0
+    print(f"\n样本分组统计：")
+    print(f"  - 高置信度组（U_pixel < {low_threshold}）：{len(high_confidence)} 个样本")
+    print(f"  - 低置信度组（U_pixel > {high_threshold}）：{len(low_confidence)} 个样本")
+    print(f"  - 中等置信度组：{len(middle_confidence)} 个样本")
+    print(f"  - 总样本数：{len(all_results)}")
     
-    avg_iou = float(np.mean(iou_scores)) if iou_scores else 0.0
-    max_iou = float(np.max(iou_scores)) if iou_scores else 0.0
-    min_iou = float(np.min(iou_scores)) if iou_scores else 0.0
+    def compute_group_stats(group: List[Dict[str, Any]], group_name: str) -> Dict[str, float]:
+        """计算分组统计"""
+        if not group:
+            return {
+                "count": 0,
+                "avg_u_pixel": 0.0,
+                "avg_psnr": 0.0,
+                "avg_ssim": 0.0,
+                "avg_iou": 0.0,
+                "avg_dice": 0.0,
+                "avg_hd95": 0.0,
+            }
+        
+        stats = {
+            "count": len(group),
+            "avg_u_pixel": np.mean([r["u_pixel"] for r in group]),
+            "avg_psnr": np.mean([r["psnr"] for r in group]),
+            "avg_ssim": np.mean([r["ssim"] for r in group]),
+            "avg_iou": np.mean([r["iou"] for r in group]),
+            "avg_dice": np.mean([r["dice"] for r in group]),
+            "avg_hd95": np.mean([r["hd95"] for r in group]),
+        }
+        
+        print(f"\n{group_name} (n={stats['count']}):")
+        print(f"  平均 U_pixel: {stats['avg_u_pixel']:.6f}")
+        print(f"  平均 PSNR: {stats['avg_psnr']:.4f}")
+        print(f"  平均 SSIM: {stats['avg_ssim']:.4f}")
+        print(f"  平均 IoU: {stats['avg_iou']:.4f}")
+        print(f"  平均 Dice: {stats['avg_dice']:.4f}")
+        print(f"  平均 HD95: {stats['avg_hd95']:.4f}")
+        
+        return stats
     
-    avg_dice = float(np.mean(dice_scores)) if dice_scores else 0.0
-    max_dice = float(np.max(dice_scores)) if dice_scores else 0.0
-    min_dice = float(np.min(dice_scores)) if dice_scores else 0.0
+    high_stats = compute_group_stats(high_confidence, "高置信度组")
+    low_stats = compute_group_stats(low_confidence, "低置信度组")
+    middle_stats = compute_group_stats(middle_confidence, "中等置信度组")
     
-    avg_hd95 = float(np.mean(hd95_scores)) if hd95_scores else 0.0
-    max_hd95 = float(np.max(hd95_scores)) if hd95_scores else 0.0
-    min_hd95 = float(np.min(hd95_scores)) if hd95_scores else 0.0
-    
-    print(f"PSNR - 平均: {avg_psnr:.4f}, 最大: {max_psnr:.4f}, 最小: {min_psnr:.4f}")
-    print(f"SSIM - 平均: {avg_ssim:.4f}, 最大: {max_ssim:.4f}, 最小: {min_ssim:.4f}")
-    print(f"IoU  - 平均: {avg_iou:.4f}, 最大: {max_iou:.4f}, 最小: {min_iou:.4f}")
-    print(f"Dice - 平均: {avg_dice:.4f}, 最大: {max_dice:.4f}, 最小: {min_dice:.4f}")
-    print(f"HD95 - 平均: {avg_hd95:.4f}, 最大: {max_hd95:.4f}, 最小: {min_hd95:.4f}")
-    
-    # 保存结果
-    results_txt = output_root / "results.txt"
-    data_source = cfg["data"].get("h5_path", "N/A")
-    with results_txt.open("w", encoding="utf-8") as handle:
-        handle.write("I2SB Evaluation Summary\n")
-        handle.write("======================\n")
-        handle.write(f"Model: {cfg['model']['checkpoint_path']}\n")
-        handle.write(f"Dataset: {data_source}\n")
-        handle.write(f"Sampling Steps: {num_steps}\n")
-        handle.write(f"N Samples: {n_samples}\n")
-        handle.write(f"OT-ODE: {ot_ode}\n")
-        handle.write("\n")
-        handle.write(f"PSNR - Average: {avg_psnr:.4f}, Max: {max_psnr:.4f}, Min: {min_psnr:.4f}\n")
-        handle.write(f"SSIM - Average: {avg_ssim:.4f}, Max: {max_ssim:.4f}, Min: {min_ssim:.4f}\n")
-        handle.write(f"IoU  - Average: {avg_iou:.4f}, Max: {max_iou:.4f}, Min: {min_iou:.4f}\n")
-        handle.write(f"Dice - Average: {avg_dice:.4f}, Max: {max_dice:.4f}, Min: {min_dice:.4f}\n")
-        handle.write(f"HD95 - Average: {avg_hd95:.4f}, Max: {max_hd95:.4f}, Min: {min_hd95:.4f}\n")
-    
-    results_csv = output_root / "results_per_image.csv"
+    # 保存详细结果
+    results_csv = output_root / "uncertainty_results_per_image.csv"
     with results_csv.open("w", newline="", encoding="utf-8") as csv_file:
-        writer = csv.DictWriter(csv_file, fieldnames=["filename", "psnr", "ssim", "iou", "dice", "hd95"])
+        fieldnames = ["filename", "u_pixel", "psnr", "ssim", "iou", "dice", "hd95", "group"]
+        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(per_image_results)
+        
+        for result in all_results:
+            if result["u_pixel"] < low_threshold:
+                group = "high"
+            elif result["u_pixel"] > high_threshold:
+                group = "low"
+            else:
+                group = "middle"
+            writer.writerow({**result, "group": group})
     
-    print(f"Results saved to {output_root}")
+    # 保存分组统计摘要
+    summary_txt = output_root / "uncertainty_summary.txt"
+    with summary_txt.open("w", encoding="utf-8") as handle:
+        handle.write("不确定性量化评估摘要\n")
+        handle.write("=" * 60 + "\n")
+        handle.write(f"模型：{cfg['model']['checkpoint_path']}\n")
+        handle.write(f"数据集：{cfg['data'].get('h5_path', 'N/A')}\n")
+        handle.write(f"采样次数：{n_samples}\n")
+        handle.write(f"高置信度阈值：U_pixel < {low_threshold}\n")
+        handle.write(f"低置信度阈值：U_pixel > {high_threshold}\n")
+        handle.write("\n")
+        
+        handle.write(f"样本分组统计：\n")
+        handle.write(f"  - 高置信度组：{high_stats['count']} 个样本\n")
+        handle.write(f"  - 低置信度组：{low_stats['count']} 个样本\n")
+        handle.write(f"  - 中等置信度组：{middle_stats['count']} 个样本\n")
+        handle.write(f"  - 总样本数：{len(all_results)}\n")
+        handle.write("\n")
+        
+        handle.write("高置信度组性能：\n")
+        handle.write(f"  平均 U_pixel: {high_stats['avg_u_pixel']:.6f}\n")
+        handle.write(f"  平均 PSNR: {high_stats['avg_psnr']:.4f}\n")
+        handle.write(f"  平均 SSIM: {high_stats['avg_ssim']:.4f}\n")
+        handle.write(f"  平均 IoU: {high_stats['avg_iou']:.4f}\n")
+        handle.write(f"  平均 Dice: {high_stats['avg_dice']:.4f}\n")
+        handle.write(f"  平均 HD95: {high_stats['avg_hd95']:.4f}\n")
+        handle.write("\n")
+        
+        handle.write("低置信度组性能：\n")
+        handle.write(f"  平均 U_pixel: {low_stats['avg_u_pixel']:.6f}\n")
+        handle.write(f"  平均 PSNR: {low_stats['avg_psnr']:.4f}\n")
+        handle.write(f"  平均 SSIM: {low_stats['avg_ssim']:.4f}\n")
+        handle.write(f"  平均 IoU: {low_stats['avg_iou']:.4f}\n")
+        handle.write(f"  平均 Dice: {low_stats['avg_dice']:.4f}\n")
+        handle.write(f"  平均 HD95: {low_stats['avg_hd95']:.4f}\n")
+        handle.write("\n")
+        
+        handle.write("中等置信度组性能：\n")
+        handle.write(f"  平均 U_pixel: {middle_stats['avg_u_pixel']:.6f}\n")
+        handle.write(f"  平均 PSNR: {middle_stats['avg_psnr']:.4f}\n")
+        handle.write(f"  平均 SSIM: {middle_stats['avg_ssim']:.4f}\n")
+        handle.write(f"  平均 IoU: {middle_stats['avg_iou']:.4f}\n")
+        handle.write(f"  平均 Dice: {middle_stats['avg_dice']:.4f}\n")
+        handle.write(f"  平均 HD95: {middle_stats['avg_hd95']:.4f}\n")
+    
+    # 保存分组统计CSV
+    group_stats_csv = output_root / "uncertainty_group_stats.csv"
+    with group_stats_csv.open("w", newline="", encoding="utf-8") as csv_file:
+        fieldnames = ["group", "count", "avg_u_pixel", "avg_psnr", "avg_ssim", "avg_iou", "avg_dice", "avg_hd95"]
+        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+        writer.writeheader()
+        
+        writer.writerow({"group": "high_confidence", **high_stats})
+        writer.writerow({"group": "low_confidence", **low_stats})
+        writer.writerow({"group": "middle_confidence", **middle_stats})
+    
+    print(f"\n结果已保存到 {output_root}")
+    print(f"  - 详细结果：{results_csv}")
+    print(f"  - 分组统计：{group_stats_csv}")
+    print(f"  - 摘要报告：{summary_txt}")
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Evaluate I2SB diffusion model.")
+    parser = argparse.ArgumentParser(description="I2SB 不确定性量化评估")
     parser.add_argument("--config",
                         type=Path,
                         default=DEFAULT_CONFIG_PATH,
-                        help="Path to I2SB evaluation configuration JSON file.")
+                        help="配置文件路径")
     return parser.parse_args()
 
 
@@ -616,13 +675,16 @@ def main() -> None:
     args = parse_args()
     cfg = load_config(args.config)
     device = resolve_device(cfg.get("device"))
-    print(f"Using device: {device}")
+    print(f"使用设备：{device}")
+    
     single_stage = env_flag("SR_SINGLE_STAGE")
     if single_stage:
-        print("Single-stage mode: I2SB conditioned on LR only.")
-    evaluate(cfg, device, two_stage=not single_stage)
+        print("单阶段模式：I2SB仅基于LR条件")
+    else:
+        print("双阶段模式：UNet粗重建 + I2SB精细化")
+    
+    evaluate_with_uncertainty(cfg, device, two_stage=not single_stage)
 
 
 if __name__ == "__main__":
     main()
-   # python I2sb/eval.py --config I2sb/eval.json

@@ -1,31 +1,31 @@
 {
   "device": "cuda",
   "data": {
-    "batch_size": 1,
+    "batch_size":30,
     "num_workers": 4,
     "image_size": 400,
     "channels": 1,
-    "h5_path": "./data/output_merge/eval.h5",
+    "h5_path": "./data/output_merge/eval_augmented.h5",
     "h5_lr_key": "TFM",
     "h5_hr_key": "hr",
     "h5_lr_dataset": "intensity",
     "transpose_lr": true,
     "transpose_hr": true,
-    "use_tfm_channels": true,
+    "use_tfm_channels": false,
     "coord_range_x": [-0.012000, 0.012000],
     "coord_range_y": [0.001000, 0.039000]
   },
   "model": {
     "module": "network",
     "backbone": "unet_res",
-    "checkpoint_path": "./SR/weight_ckpt/unetonly-0107.pth"
+    "checkpoint_path": "./SR/weight_ckpt/unetonly-0113-1-z.pth"
   },
   "sampler": {
-    "threshold": 0.5,
+    "threshold": 0.9,
     "seed": 1234
   },
   "output": {
-    "root": "SR/eval_results_unetonly_0107",
+    "root": "SR/eval_results_unetonly_0113-1-z-augmented-0124",
     "save_images": true
   }
 }

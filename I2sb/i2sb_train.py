@@ -223,7 +223,7 @@ def build_models(cfg: Dict[str, Any],
         if unet_backbone_key not in MODEL_CONFIGS:
             raise KeyError(f"Unknown UNet backbone '{unet_backbone_key}'")
         unet_cfg = MODEL_CONFIGS[unet_backbone_key].copy()
-        unet = build_network(unet_cfg, in_channels, image_size, lr_channels, n_steps=None).to(device)
+        unet = build_network(unet_cfg, in_channels, image_size, 1, n_steps=None).to(device)
     
     # 2. 构建 I2SB（用于桥接）
     i2sb_backbone_key = model_cfg.get("i2sb_backbone", "unet_res")
@@ -465,7 +465,7 @@ def train(diffusion: Diffusion,
                 if two_stage:
                     # 第一级：UNet 生成粗糙 HR（冻结）
                     with torch.inference_mode():
-                        coarse_hr = unet(tfm)  # [B, 1, H, W]
+                        coarse_hr = unet(tfm[:, :1])  # [B, 1, H, W]
                     # 构建条件输入：粗糙HR(1) + TFM(3) = 4通道
                     condition = torch.cat([coarse_hr, tfm], dim=1)  # [B, 4, H, W]
                     bridge_start = coarse_hr
@@ -522,7 +522,7 @@ def train(diffusion: Diffusion,
                     batch_size = val_hr_images.size(0)
 
                     if two_stage:
-                        coarse_hr = unet(val_tfm)
+                        coarse_hr = unet(val_tfm[:, :1])
                         condition = torch.cat([coarse_hr, val_tfm], dim=1)
                         bridge_start = coarse_hr
                     else:
@@ -558,7 +558,7 @@ def train(diffusion: Diffusion,
                 preview_batch = min(preview_count, tfm.size(0))
                 tfm_subset = tfm[:preview_batch]
                 if two_stage:
-                    coarse_subset = unet(tfm_subset)  # 粗糙HR
+                    coarse_subset = unet(tfm_subset[:, :1])  # 粗糙HR
                     condition_subset = torch.cat([coarse_subset, tfm_subset], dim=1)
                 else:
                     coarse_subset = None

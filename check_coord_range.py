@@ -138,9 +138,9 @@ def check_coord_ranges(h5_path: str, group_name: str = "TFM") -> dict:
 
 def main():
     parser = argparse.ArgumentParser(description="检查 HDF5 数据集的坐标范围")
-    parser.add_argument('--train', type=str, default='./data/output_merge/train.h5',
+    parser.add_argument('--train', type=str, default='./data/trainexp.h5',
                         help='训练集 HDF5 文件路径')
-    parser.add_argument('--eval', type=str, default='./data/output_merge/eval.h5',
+    parser.add_argument('--eval', type=str, default='./data/evalexp.h5',
                         help='评估集 HDF5 文件路径')
     parser.add_argument('--group', type=str, default='TFM',
                         help='数据组名称')
