@@ -21,6 +21,9 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 import h5py
+import matplotlib
+matplotlib.use('Agg')  # 无GUI后端
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -198,12 +201,37 @@ def augment_sample(
     return intensity, x_coord, y_coord, hr
 
 
-def augment_dataset(cfg: Dict[str, Any]) -> None:
+def save_as_png(data: np.ndarray, output_path: Path, is_hr: bool = False) -> None:
     """
-    读取原始数据集，应用增强，保存到新文件
+    将矩阵保存为PNG图像（原始分辨率，无边框无colorbar）
+    
+    Args:
+        data: (H, W) numpy数组
+        output_path: 输出文件路径
+        is_hr: 是否为HR图像（灰度图）
+    """
+    fig, ax = plt.subplots(figsize=(data.shape[1]/100, data.shape[0]/100), dpi=100)
+    
+    if is_hr:
+        # HR使用灰度图
+        ax.imshow(data, cmap='gray', interpolation='nearest')
+    else:
+        # TFM使用jet colormap
+        ax.imshow(data, cmap='jet', interpolation='nearest')
+    
+    ax.axis('off')
+    plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
+    plt.savefig(output_path, dpi=100, bbox_inches='tight', pad_inches=0)
+    plt.close(fig)
+
+
+def augment_dataset(cfg: Dict[str, Any], output_dir: Optional[Path] = None) -> None:
+    """
+    读取原始数据集，应用增强，保存到新文件，并可选地保存PNG图像
     
     Args:
         cfg: 配置字典
+        output_dir: PNG图像输出目录（可选）
     """
     input_path = Path(cfg["input_h5"])
     output_path = Path(cfg["output_h5"])
@@ -221,6 +249,18 @@ def augment_dataset(cfg: Dict[str, Any]) -> None:
     
     # 确保输出目录存在
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    # 设置PNG输出目录
+    tfm_dir, hr_dir = None, None
+    if output_dir is not None:
+        output_dir = Path(output_dir)
+        tfm_dir = output_dir / "tfm"
+        hr_dir = output_dir / "hr"
+        tfm_dir.mkdir(parents=True, exist_ok=True)
+        hr_dir.mkdir(parents=True, exist_ok=True)
+        print(f"PNG输出目录: {output_dir}")
+        print(f"  - TFM子文件夹: {tfm_dir}")
+        print(f"  - HR子文件夹: {hr_dir}")
     
     with h5py.File(input_path, "r") as f_in, \
          h5py.File(output_path, "w") as f_out:
@@ -286,6 +326,13 @@ def augment_dataset(cfg: Dict[str, Any]) -> None:
                 intensity_transposed, x_coord_transposed, y_coord_transposed, hr_transposed, cfg
             )
             
+            # 保存PNG图像（在转置为MATLAB格式之前，此时是Python H×W格式）
+            if output_dir is not None:
+                tfm_png_path = tfm_dir / f"{sample_name}.png"
+                hr_png_path = hr_dir / f"{sample_name}.png"
+                save_as_png(intensity_aug, tfm_png_path, is_hr=False)
+                save_as_png(hr_aug, hr_png_path, is_hr=True)
+            
             # 转置回MATLAB格式 (Python H×W → MATLAB W×H)
             intensity_aug = intensity_aug.T
             x_coord_aug = x_coord_aug.T if x_coord_aug is not None else None
@@ -337,6 +384,12 @@ def parse_args():
         default=Path("augment/augment_config.json"),
         help="增强配置文件路径"
     )
+    parser.add_argument(
+        "--output_dir",
+        type=Path,
+        default=None,
+        help="PNG图像输出目录（可选，自动创建tfm和hr子文件夹）"
+    )
     return parser.parse_args()
 
 
@@ -348,8 +401,9 @@ def main() -> None:
     set_seed(cfg.get("seed", 42))
     
     # 执行增强
-    augment_dataset(cfg)
+    augment_dataset(cfg, output_dir=args.output_dir)
 
 
 if __name__ == "__main__":
     main()
+# python augment/augment_eval_dataset.py --config augment/augment_config.json --output_dir ./data/output_images_sim

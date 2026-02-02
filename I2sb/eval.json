@@ -1,19 +1,19 @@
 {
   "device": "cuda",
   "data": {
-    "batch_size": 4,
+    "batch_size": 20,
     "num_workers": 4,
     "image_size": 400,
     "channels": 1,
-    "h5_path": "./data/output_merge/eval_augmented.h5",
+    "h5_path": "./data/evalexp_augmented.h5",
     "h5_lr_key": "TFM",
     "h5_hr_key": "hr",
     "h5_lr_dataset": "intensity",
     "transpose_lr": true,
     "transpose_hr": true,
     "use_tfm_channels": true,
-    "coord_range_x": [-0.012000, 0.012000],
-    "coord_range_y": [0.001000, 0.039000],
+    "coord_range_x": [-0.02600, 0.02600],
+    "coord_range_y": [0.00200, 0.1],
     "augment": false,
     "h_flip_prob": 0.5,
     "translate_prob": 0.5,
@@ -24,9 +24,9 @@
     "backbone": "unet_res_diffusion",
     "unet_backbone": "unet_res",
     "i2sb_backbone": "unet_res_diffusion",
-    "unet_checkpoint": "SR/weight_ckpt/unetonly-0113-1-z.pth",
+    "unet_checkpoint": "./SR/weight_ckpt/unet-exp0131.pth",
     "diffusion_steps": 1000,
-    "checkpoint_path": "SR/weight_ckpt/i2sb_tfm_refine_base.pth"
+    "checkpoint_path": "./SR/weight_ckpt/i2sb_exp_0131-3-z.pth"
   },
   "vae": {
     "enabled": false,
@@ -35,14 +35,14 @@
     "decoder_key": "dec"
   },
   "sampler": {
-    "threshold": 0.9,
+    "threshold": 0.5,
     "num_steps": 100,
     "ot_ode": false,
     "seed": 1234,
-    "n_samples": 5
+    "n_samples": 1
   },
   "output": {
-    "root": "SR/eval_results_i2sb_tfm_refine_base_0113-1-augmented0131",
+    "root": "SR/eval_results_i2sb_exp_0131-3-augmente-th05",
     "save_images": true
   }
 }

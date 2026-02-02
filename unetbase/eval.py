@@ -353,7 +353,7 @@ def evaluate(cfg: Dict[str, Any], device: torch.device) -> None:
             hr_images = hr_images.to(device)
             
             sr_images = net(lr_images)
-            
+            # sr_images = hr_images
             # 反归一化
             sr_for_metric = denormalize(sr_images)
             

@@ -1,5 +1,5 @@
 {
-  "input_h5": "./data/output_merge/eval.h5",
+  "input_h5": "data\\output_merge\\eval.h5",
   "output_h5": "./data/output_merge/eval_augmented.h5",
   
   "lr_key": "TFM",

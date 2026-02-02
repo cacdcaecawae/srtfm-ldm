@@ -5,7 +5,7 @@
 
 用法:
     python augment/visualize_eval_sample.py --sample 901_1
-    python augment/visualize_eval_sample.py --sample 933_1 --h5 data/output_merge/eval_augmented.h5
+    python augment/visualize_eval_sample.py --sample 0008 --h5 data/evalexp_augmented.h5
 """
 
 import argparse

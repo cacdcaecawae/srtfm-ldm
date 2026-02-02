@@ -12,20 +12,20 @@
     "transpose_lr": true,
     "transpose_hr": true,
     "use_tfm_channels": false,
-    "coord_range_x": [-0.012000, 0.012000],
-    "coord_range_y": [0.001000, 0.039000]
+    "coord_range_x": [-0.02600, 0.02600],
+    "coord_range_y": [0.00200, 0.1]
   },
   "model": {
     "module": "network",
     "backbone": "unet_res",
-    "checkpoint_path": "./SR/weight_ckpt/unetonly-0113-1-z.pth"
+    "checkpoint_path": "./SR/weight_ckpt/unetonly_0110-1.pth"
   },
   "sampler": {
-    "threshold": 0.9,
+    "threshold": 0.5,
     "seed": 1234
   },
   "output": {
-    "root": "SR/eval_results_unetonly_0113-1-z-augmented-0124",
+    "root": "SR/eval_results_unet-unetonly_0110-1-new",
     "save_images": true
   }
 }
